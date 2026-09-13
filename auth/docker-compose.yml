@@ -1,0 +1,12 @@
+version: "3.1"
+services:
+  auth:
+    container_name: auth-server
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "19253:19253"
+    volumes:
+      - "./data:/opt/veloren-auth/data"

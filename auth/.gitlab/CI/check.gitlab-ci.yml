@@ -1,0 +1,26 @@
+.rust:
+  image: rust:1.76-slim
+  before_script:
+    # A hack to prevent the entire toolchain from getting re-downloaded (as stable != 1.76.0)
+    - echo "1.76.0" > rust-toolchain
+
+code-quality:
+  extends: .rust
+  stage: check
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  tags: ["check"]
+  script:
+    - rustup component add rustfmt
+    - rustup component add clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --all-targets -- -D warnings
+
+
+unittests:
+  extends: .rust
+  stage: build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - cargo test --all
