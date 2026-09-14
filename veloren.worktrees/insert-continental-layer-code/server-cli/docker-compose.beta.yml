@@ -1,0 +1,69 @@
+version: "3.5"
+
+services:
+  beta-auth:
+    build:
+      context: ../auth-service
+    container_name: veloren-beta-auth
+    ports:
+      - "19253:19253"
+    environment:
+      - BETA_AUTH_BIND=0.0.0.0:19253
+      - BETA_AUTH_DATA_PATH=/data/auth-state.json
+    volumes:
+      - "./beta-auth-data:/data"
+    restart: unless-stopped
+
+  marketplace:
+    build:
+      context: ..
+      dockerfile: marketplace-service/Dockerfile
+    container_name: veloren-beta-marketplace
+    expose:
+      - "19254"
+    environment:
+      - VELOREN_MARKETPLACE_BIND=0.0.0.0:19254
+      - VELOREN_SOLANA_RPC_URL=${VELOREN_SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      - VELOREN_MARKETPLACE_SELLER=${VELOREN_MARKETPLACE_SELLER}
+      - VELOREN_MARKETPLACE_LAND_MINT=${VELOREN_MARKETPLACE_LAND_MINT}
+      - VELOREN_MARKETPLACE_PARCEL_ID=${VELOREN_MARKETPLACE_PARCEL_ID:-DEV-LAND-0002}
+      - VELOREN_MARKETPLACE_PRICE_LAMPORTS=${VELOREN_MARKETPLACE_PRICE_LAMPORTS:-1000000}
+      - VELOREN_MARKETPLACE_MINT_DECIMALS=${VELOREN_MARKETPLACE_MINT_DECIMALS:-0}
+      - VELOREN_MARKETPLACE_SELLER_KEYPAIR_FILE=/run/secrets/marketplace_seller_keypair
+    secrets:
+      - marketplace_seller_keypair
+    restart: unless-stopped
+
+  game-server:
+    image: registry.gitlab.com/veloren/veloren/server-cli:weekly
+    stdin_open: true
+    tty: true
+    container_name: veloren-game-server-beta
+    ports:
+      - "14004:14004"
+      - "14005:14005"
+      - "14006:14006/udp"
+    restart: unless-stopped
+    volumes:
+      - "./userdata:/opt/userdata"
+    environment:
+      - RUST_LOG=info
+      - VELOREN_ENVIRONMENT=beta
+      - VELOREN_AUTH_MODE=remote
+      - VELOREN_AUTH_SERVER_URL=http://beta-auth:19253
+      - VELOREN_SERVER_NAME=${VELOREN_SERVER_NAME:-Veloren Public Beta}
+      - VELOREN_MAX_PLAYERS=${VELOREN_MAX_PLAYERS:-50}
+    depends_on:
+      - beta-auth
+      - marketplace
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 30 --stop-timeout 130s --cleanup veloren-game-server-beta
+    restart: unless-stopped
+
+secrets:
+  marketplace_seller_keypair:
+    file: ${VELOREN_MARKETPLACE_SELLER_KEYPAIR_FILE}

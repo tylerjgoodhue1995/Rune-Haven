@@ -1,0 +1,456 @@
+use std::f32::consts::PI;
+
+use super::{
+    super::{Animation, vek::*},
+    BipedSmallSkeleton, SkeletonAttr, biped_small_alpha_axe, biped_small_alpha_dagger,
+    biped_small_alpha_spear, biped_small_wield_spear, init_biped_small_alpha,
+};
+use common::states::utils::StageSection;
+
+pub struct ComboAnimation;
+impl Animation for ComboAnimation {
+    type Dependency<'a> = (Option<&'a str>, StageSection, usize, Vec3<f32>, f32, f32);
+    type Skeleton = BipedSmallSkeleton;
+
+    #[cfg(feature = "use-dyn-lib")]
+    const UPDATE_FN: &'static [u8] = b"biped_small_combo\0";
+
+    #[cfg_attr(feature = "be-dyn-lib", unsafe(export_name = "biped_small_combo"))]
+    fn update_skeleton_inner(
+        skeleton: &Self::Skeleton,
+        (ability_id, stage_section, current_strike, velocity, _global_time, _timer): Self::Dependency<'_>,
+        anim_time: f32,
+        rate: &mut f32,
+        s_a: &SkeletonAttr,
+    ) -> Self::Skeleton {
+        *rate = 1.0;
+        let mut next = (*skeleton).clone();
+
+        next.main.position = Vec3::new(0.0, 0.0, 0.0);
+        next.main.orientation = Quaternion::rotation_z(0.0);
+        next.second.position = Vec3::new(0.0, 0.0, 0.0);
+        next.second.orientation = Quaternion::rotation_z(0.0);
+        let multi_strike_pullback = 1.0
+            - if matches!(stage_section, StageSection::Recover) {
+                anim_time.powi(4)
+            } else {
+                0.0
+            };
+
+        for strike in 0..=current_strike {
+            match ability_id {
+                Some(
+                    "common.abilities.custom.bushly.singlestrike"
+                    | "common.abilities.custom.irrwurz.singlestrike"
+                    | "common.abilities.custom.husk.singlestrike"
+                    | "common.abilities.custom.husk.triplestrike"
+                    | "common.abilities.custom.dwarves.iron_dwarf.singlestrike"
+                    | "common.abilities.custom.dwarves.iron_dwarf.triplestrike",
+                ) => {
+                    let (move1, move2) = if strike == current_strike {
+                        match stage_section {
+                            StageSection::Buildup => {
+                                (((anim_time.max(0.4) - 0.4) * 1.5).powf(0.5), 0.0)
+                            },
+                            StageSection::Action => (1.0, (anim_time.min(0.4) * 2.5).powi(2)),
+                            StageSection::Recover => (1.0, 1.0),
+                            _ => (0.0, 0.0),
+                        }
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let move1 = move1 * multi_strike_pullback;
+                    let move2 = move2 * multi_strike_pullback;
+                    next.hand_l.position = Vec3::new(s_a.grip.0 * 4.0, 0.0, s_a.grip.2);
+                    next.hand_r.position = Vec3::new(-s_a.grip.0 * 4.0, 0.0, s_a.grip.2);
+                    next.main.position = Vec3::new(0.0, 0.0, 0.0);
+                    next.main.orientation = Quaternion::rotation_x(0.0);
+                    next.hand_l.orientation = Quaternion::rotation_x(0.0);
+                    next.hand_r.orientation = Quaternion::rotation_x(0.0);
+
+                    match strike {
+                        0..=2 => {
+                            next.chest.orientation = Quaternion::rotation_x(move2 * -1.0)
+                                * Quaternion::rotation_z(move1 * 1.2 + move2 * -1.8);
+                            next.hand_l.position = Vec3::new(-s_a.hand.0, s_a.hand.1, s_a.hand.2);
+                            next.hand_l.orientation = Quaternion::rotation_x(1.2);
+                            next.hand_r.position = Vec3::new(s_a.hand.0, s_a.hand.1, s_a.hand.2);
+                            next.hand_r.orientation = Quaternion::rotation_x(1.2);
+                        },
+                        _ => {},
+                    }
+                },
+                Some("common.abilities.custom.cactid.singlestrike") => {
+                    let (move1, move2) = if strike == current_strike {
+                        match stage_section {
+                            StageSection::Buildup => {
+                                (((anim_time.max(0.4) - 0.4) * 1.5).powf(0.5), 0.0)
+                            },
+                            StageSection::Action => (1.0, (anim_time.min(0.4) * 2.5).powi(2)),
+                            StageSection::Recover => (1.0, 1.0),
+                            _ => (0.0, 0.0),
+                        }
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let move1 = move1 * multi_strike_pullback;
+                    let move2 = move2 * multi_strike_pullback;
+                    next.hand_l.position = Vec3::new(s_a.grip.0 * 4.0, 0.0, s_a.grip.2);
+                    next.hand_r.position = Vec3::new(-s_a.grip.0 * 4.0, 0.0, s_a.grip.2);
+                    next.main.position = Vec3::new(0.0, 0.0, 0.0);
+                    next.main.orientation = Quaternion::rotation_x(0.0);
+                    next.hand_l.orientation = Quaternion::rotation_x(0.0);
+                    next.hand_r.orientation = Quaternion::rotation_x(0.0);
+                    next.head.orientation = Quaternion::rotation_z(move2 * 1.0);
+
+                    next.chest.orientation = Quaternion::rotation_x(move2 * -1.0)
+                        * Quaternion::rotation_z(move1 * -1.2 + move2 * 1.8);
+                    next.hand_l.position = Vec3::new(-s_a.hand.0, s_a.hand.1, s_a.hand.2);
+                    next.hand_l.orientation = Quaternion::rotation_x(1.2);
+                    next.hand_r.position = Vec3::new(s_a.hand.0, s_a.hand.1, s_a.hand.2);
+                    next.hand_r.orientation = Quaternion::rotation_x(1.2);
+                },
+                Some(
+                    "common.abilities.axesimple.doublestrike"
+                    | "common.abilities.custom.goblin_thug.doublestrike"
+                    | "common.abilities.custom.green_legoom.doublestrike"
+                    | "common.abilities.custom.red_legoom.doublestrike"
+                    | "common.abilities.vampire.bloodservant.doublestrike"
+                    | "common.abilities.custom.boreal_warrior.hammer.singlestrike",
+                ) => {
+                    let anim_time = anim_time.min(1.0);
+                    let (move1base, move2base, move3) = match stage_section {
+                        StageSection::Buildup => (anim_time.sqrt(), 0.0, 0.0),
+                        StageSection::Action => (1.0, anim_time.powi(4), 0.0),
+                        StageSection::Recover => (1.0, 1.0, anim_time),
+                        _ => (0.0, 0.0, 0.0),
+                    };
+                    let pullback = 1.0 - move3;
+                    let move1abs = move1base * pullback;
+                    let move2abs = move2base * pullback;
+
+                    init_biped_small_alpha(&mut next, s_a);
+                    biped_small_alpha_axe(&mut next, s_a, move1abs, move2abs);
+                },
+                Some("common.abilities.custom.umber_legoom.doublestrike") => {
+                    let anim_time = anim_time.min(1.0);
+                    let (move1base, move2base) = if strike == current_strike {
+                        match stage_section {
+                            StageSection::Buildup => (anim_time.sqrt(), 0.0),
+                            StageSection::Action => (1.0, anim_time.powi(4)),
+                            StageSection::Recover => (1.0, 1.0),
+                            _ => (0.0, 0.0),
+                        }
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let move1 = move1base * multi_strike_pullback;
+                    let move2 = move2base * multi_strike_pullback;
+                    next.chest.orientation =
+                        Quaternion::rotation_z(PI * 0.45 * move1 - PI * 1.0 * move2);
+                    next.hand_r.position = Vec3::new(0.5, 2.0, 0.5);
+                    next.hand_r.orientation = Quaternion::rotation_x(PI * 0.45);
+                    next.hand_l.position = Vec3::new(-0.5, 2.0, 0.5);
+                    next.hand_l.orientation = Quaternion::rotation_x(PI * 0.45);
+                    match strike {
+                        0 => {
+                            next.head.orientation =
+                                Quaternion::rotation_z(-PI * 0.3 * move1 + PI * 0.6 * move2);
+
+                            next.main.position = Vec3::new(-1.0, 10.0, -3.0);
+                        },
+                        _ => {
+                            next.head.orientation =
+                                Quaternion::rotation_z(-PI * 0.3 * move1 + PI * 0.6 * move2)
+                                    * Quaternion::rotation_x(PI / 8.0 * move1 - PI / 8.0 * move2);
+
+                            next.control
+                                .orientation
+                                .rotate_x(PI / 8.0 * move1 - PI / 8.0 * move2);
+
+                            next.main.position = Vec3::new(-1.0 + 4.0 * move2, 10.0, -3.0);
+                            next.main.orientation = Quaternion::rotation_y(-PI / 3.0 * move2);
+                        },
+                    }
+                },
+                Some("common.abilities.custom.ashen_warrior.axe.doublestrike") => {
+                    let anim_time = anim_time.min(1.0);
+                    let (move1base, move2base) = if strike == current_strike {
+                        match stage_section {
+                            StageSection::Buildup => (anim_time.sqrt(), 0.0),
+                            StageSection::Action => (1.0, anim_time.powi(4)),
+                            StageSection::Recover => (1.0, 1.0),
+                            _ => (0.0, 0.0),
+                        }
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let move1 = move1base * multi_strike_pullback;
+                    let move2 = move2base * multi_strike_pullback;
+
+                    match strike {
+                        0 => {
+                            next.main.position = Vec3::new(-8.0, 2.0, 0.0);
+                            next.main.orientation = Quaternion::rotation_x(0.0);
+                            next.second.position = Vec3::new(8.0, 2.0, 0.0);
+                            next.second.orientation = Quaternion::rotation_x(0.0);
+                            next.hand_l.position = Vec3::new(s_a.grip.0 * 4.0, 0.0, 2.0);
+                            next.hand_l.orientation = Quaternion::rotation_x(PI / 2.0);
+                            next.hand_r.position = Vec3::new(-s_a.grip.0 * 4.0, 0.0, 2.0);
+                            next.hand_r.orientation = Quaternion::rotation_x(PI / 2.0);
+
+                            next.chest.orientation.rotate_z(PI / 4.0 * move1);
+                            next.pants.orientation.rotate_z(-PI / 8.0 * move1);
+                            next.hand_l.position += Vec3::new(0.0, 0.0, 2.0) * move1;
+                            next.hand_l.orientation.rotate_y(-PI / 8.0 * move1);
+                            next.main.orientation.rotate_y(-PI / 8.0 * move1);
+                            next.control_r.orientation.rotate_y(-PI / 8.0 * move1);
+
+                            next.chest.orientation.rotate_z(-PI / 2.5 * move2);
+                            next.pants.orientation.rotate_z(PI / 8.0 * move2);
+                            next.hand_l.position += Vec3::new(0.0, 5.0, -3.0) * move2;
+                            next.hand_l.orientation.rotate_x(-PI / 3.0 * move2);
+                            next.hand_l.orientation.rotate_y(-PI / 4.0 * move2);
+                            next.hand_l.orientation.rotate_z(-PI / 4.0 * move2);
+                            next.main.position += Vec3::new(0.0, 5.0, -3.0) * move2;
+                            next.main.orientation.rotate_x(-PI / 3.0 * move2);
+                            next.main.orientation.rotate_y(-PI / 4.0 * move2);
+                            next.main.orientation.rotate_z(-PI / 4.0 * move2);
+                        },
+                        1 => {
+                            next.chest.orientation.rotate_z(-PI / 5.0 * move1);
+                            next.control_r.orientation.rotate_y(PI / 4.0 * move1);
+
+                            next.chest.orientation.rotate_z(PI / 2.0 * move2);
+                            next.hand_l.position += Vec3::new(0.0, -4.0, 0.0) * move2;
+                            next.hand_l.orientation.rotate_x(PI / 6.0 * move2);
+                            next.hand_l.orientation.rotate_y(PI / 8.0 * move2);
+                            next.hand_l.orientation.rotate_z(PI / 8.0 * move2);
+                            next.main.position += Vec3::new(0.0, -4.0, 0.0) * move2;
+                            next.main.orientation.rotate_x(PI / 6.0 * move2);
+                            next.main.orientation.rotate_y(PI / 8.0 * move2);
+                            next.main.orientation.rotate_z(PI / 8.0 * move2);
+                            next.control_r.orientation.rotate_x(-PI / 4.0 * move2);
+                            next.control_r.orientation.rotate_y(PI / 8.0 * move2);
+                            next.control_r.orientation.rotate_z(PI / 8.0 * move2);
+                        },
+                        _ => {},
+                    }
+                },
+                Some("common.abilities.custom.ashen_warrior.axe.knockback_combo") => {
+                    let anim_time = anim_time.min(1.0);
+                    let (move1base, move2base, move3base) = if strike == current_strike {
+                        match stage_section {
+                            StageSection::Buildup => (anim_time, 0.0, 0.0),
+                            StageSection::Action => (1.0, anim_time, 0.0),
+                            StageSection::Recover => (1.0, 1.0, anim_time),
+                            _ => (0.0, 0.0, 0.0),
+                        }
+                    } else {
+                        (1.0, 1.0, 1.0)
+                    };
+                    let multi_strike_pullback = 1.0 - move3base;
+                    let move1 = move1base * multi_strike_pullback;
+                    let move2 = move2base * multi_strike_pullback;
+
+                    match strike {
+                        0 => {
+                            next.main.position = Vec3::new(-8.0, 2.0, 0.0);
+                            next.main.orientation = Quaternion::rotation_x(0.0);
+                            next.second.position = Vec3::new(8.0, 2.0, 0.0);
+                            next.second.orientation = Quaternion::rotation_x(0.0);
+                            next.hand_l.position = Vec3::new(s_a.grip.0 * 4.0, 0.0, 2.0);
+                            next.hand_l.orientation = Quaternion::rotation_x(PI / 2.0);
+                            next.hand_r.position = Vec3::new(-s_a.grip.0 * 4.0, 0.0, 2.0);
+                            next.hand_r.orientation = Quaternion::rotation_x(PI / 2.0);
+
+                            next.hand_l.position += Vec3::new(-6.0, 0.0, -4.0) * move1;
+                            next.hand_l.orientation.rotate_y(PI / 1.3 * move1);
+                            next.main.position += Vec3::new(0.0, 0.0, 4.0) * move1;
+                            next.main.orientation.rotate_y(PI / 1.3 * move1);
+                            next.control_r.position += Vec3::new(15.0, 0.0, -5.0) * move1;
+                            next.control_r.orientation.rotate_y(-PI / 1.3 * move1);
+                            next.chest.orientation.rotate_x(-PI / 12.0 * move1);
+                            next.pants.orientation.rotate_x(PI / 12.0 * move1);
+
+                            next.control_r.orientation.rotate_x(PI / 2.0 * move2);
+                            next.control_r.orientation.rotate_y(PI / 2.0 * move2);
+                            next.control_r.orientation.rotate_z(-PI / 4.0 * move2);
+                            next.hand_l.orientation.rotate_x(PI / 2.0 * move2);
+                            next.hand_l.orientation.rotate_y(-PI / 2.0 * move2);
+                            next.hand_l.orientation.rotate_z(PI / 4.0 * move2);
+                            next.main.orientation.rotate_x(PI / 2.0 * move2);
+                            next.main.orientation.rotate_y(-PI / 2.0 * move2);
+                            next.main.orientation.rotate_z(PI / 4.0 * move2);
+                            next.chest.orientation.rotate_x(PI / 8.0 * move2);
+                            next.pants.orientation.rotate_x(-PI / 8.0 * move2);
+                        },
+                        1 => {
+                            let rotate_about =
+                                |bone: &mut Transform<f32, f32, f32>,
+                                 pivot: Vec3<f32>,
+                                 rotation: Quaternion<f32>| {
+                                    bone.orientation = bone.orientation * rotation;
+                                    bone.position = rotation * (bone.position - pivot) + pivot;
+                                };
+
+                            next.chest.orientation.rotate_x(PI * move1base);
+                            rotate_about(
+                                &mut next.foot_l,
+                                next.chest.position,
+                                Quaternion::rotation_x(PI * move1base),
+                            );
+                            rotate_about(
+                                &mut next.foot_r,
+                                next.chest.position,
+                                Quaternion::rotation_x(PI * move1base),
+                            );
+                            next.pants.orientation.rotate_x(PI / 4.0 * move1);
+                            next.foot_l.orientation.rotate_x(PI / 4.0 * move1);
+                            next.foot_r.orientation.rotate_x(PI / 4.0 * move1);
+                            next.control_r.orientation.rotate_y(-PI / 2.0 * move1);
+                            next.hand_l.orientation.rotate_y(-PI / 2.0 * move1);
+                            next.main.orientation.rotate_y(-PI / 2.0 * move1);
+
+                            next.chest.orientation.rotate_z(2.0 * PI * move2base);
+                            next.foot_l.orientation.rotate_z(2.0 * PI * move2base);
+                            next.foot_r.orientation.rotate_z(2.0 * PI * move2base);
+                            next.pants.orientation.rotate_x(-PI / 4.0 * move2);
+                            next.foot_l.orientation.rotate_x(-PI / 4.0 * move2);
+                            next.foot_r.orientation.rotate_x(-PI / 4.0 * move2);
+
+                            next.chest.orientation.rotate_x(PI * move3base);
+                            rotate_about(
+                                &mut next.foot_l,
+                                next.chest.position,
+                                Quaternion::rotation_x(PI * move3base),
+                            );
+                            rotate_about(
+                                &mut next.foot_r,
+                                next.chest.position,
+                                Quaternion::rotation_x(PI * move3base),
+                            );
+                        },
+                        _ => {},
+                    }
+                },
+                Some("common.abilities.custom.boreal_warrior.bow.doublestrike") => {
+                    let anim_time = anim_time.min(1.0);
+                    let (move1base, move2base) = if strike == current_strike {
+                        match stage_section {
+                            StageSection::Buildup => (anim_time.sqrt(), 0.0),
+                            StageSection::Action => (1.0, anim_time.powi(4)),
+                            StageSection::Recover => (1.0, 1.0),
+                            _ => (0.0, 0.0),
+                        }
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let move1 = move1base * multi_strike_pullback;
+                    let move2 = move2base * multi_strike_pullback;
+
+                    match strike {
+                        0 => {
+                            init_biped_small_alpha(&mut next, s_a);
+
+                            next.control.position += Vec3::new(0.0, 8.0, 0.0);
+                            next.control.orientation.rotate_x(-PI / 8.0);
+                            next.hand_l.position += Vec3::new(-6.0, -4.0, -4.0);
+                            next.hand_l.orientation.rotate_x(PI / 2.0);
+                            next.hand_l.orientation.rotate_z(-PI / 8.0);
+                            next.hand_r.position += Vec3::new(4.0, -4.0, -6.0);
+                            next.hand_r.orientation.rotate_x(PI / 2.0);
+                            next.hand_r.orientation.rotate_z(PI / 9.0);
+
+                            next.chest.orientation.rotate_z(PI / 4.0 * move1);
+                            next.control.position += Vec3::new(0.0, (PI * move1).cos(), 0.0);
+                            next.control.orientation.rotate_y(-PI / 8.0 * move1);
+                            next.control.orientation.rotate_x(-PI / 8.0 * move1.powi(2));
+
+                            next.control
+                                .orientation
+                                .rotate_y(-PI / 3.0 * f32::from(move2 != 0.0));
+                            next.chest.orientation.rotate_z(-PI / 2.5 * move2);
+                        },
+                        1 => {
+                            next.chest.orientation.rotate_z(-PI / 5.0 * move1);
+                            next.control.position += Vec3::new(0.0, (PI * move1).cos(), 0.0);
+                            next.control.orientation.rotate_y(PI / 2.0 * move1);
+
+                            next.control
+                                .orientation
+                                .rotate_y(PI / 3.0 * f32::from(move2 != 0.0));
+                            next.chest.orientation.rotate_z(PI / 2.0 * move2);
+                        },
+                        _ => {},
+                    }
+                },
+                Some(
+                    "common.abilities.daggersimple.singlestrike"
+                    | "common.abilities.vampire.bloodmoon_heiress.singlestrike",
+                ) => {
+                    let anim_time = anim_time.min(1.0);
+                    let (move1base, move2base, move3) = match stage_section {
+                        StageSection::Buildup => (anim_time.sqrt(), 0.0, 0.0),
+                        StageSection::Action => (1.0, anim_time.powi(4), 0.0),
+                        StageSection::Recover => (1.0, 1.0, anim_time),
+                        _ => (0.0, 0.0, 0.0),
+                    };
+                    let pullback = 1.0 - move3;
+                    let move1abs = move1base * pullback;
+                    let move2abs = move2base * pullback;
+
+                    init_biped_small_alpha(&mut next, s_a);
+                    biped_small_alpha_dagger(&mut next, s_a, move1abs, move2abs);
+                },
+                Some(
+                    "common.abilities.spear.doublestrike"
+                    | "common.abilities.custom.purple_legoom.doublestrike",
+                ) => {
+                    let anim_time = anim_time.min(1.0);
+                    let speed = Vec2::<f32>::from(velocity).magnitude();
+                    let speednorm = speed / 9.4;
+                    let speednormcancel = 1.0 - speednorm;
+
+                    let (move1base, move2base, move3) = match stage_section {
+                        StageSection::Buildup => (anim_time.sqrt(), 0.0, 0.0),
+                        StageSection::Action => (1.0, anim_time.powi(4), 0.0),
+                        StageSection::Recover => (1.0, 1.0, anim_time),
+                        _ => (0.0, 0.0, 0.0),
+                    };
+                    let pullback = 1.0 - move3;
+                    let move1abs = move1base * pullback;
+                    let move2abs = move2base * pullback;
+
+                    init_biped_small_alpha(&mut next, s_a);
+                    biped_small_alpha_spear(
+                        &mut next,
+                        s_a,
+                        move1abs,
+                        move2abs,
+                        anim_time,
+                        speednormcancel,
+                    );
+                },
+                Some("common.abilities.haniwa.guard.backpedal") => {
+                    init_biped_small_alpha(&mut next, s_a);
+                    biped_small_wield_spear(&mut next, s_a, anim_time, 0.0, 0.0);
+
+                    let (move1, move2, move3) = match stage_section {
+                        StageSection::Buildup => (anim_time.powf(0.25), 0.0, 0.0),
+                        StageSection::Action => (1.0, anim_time, 0.0),
+                        StageSection::Recover => (1.0, 1.0, anim_time.powf(0.25)),
+                        _ => (0.0, 0.0, 0.0),
+                    };
+                    let pullback = 1.0 - move3;
+                    let move1 = move1 * pullback;
+                    let move2 = move2 * pullback;
+
+                    biped_small_alpha_spear(&mut next, s_a, move1, move2, anim_time, 0.0);
+                },
+                _ => {},
+            }
+        }
+        next
+    }
+}

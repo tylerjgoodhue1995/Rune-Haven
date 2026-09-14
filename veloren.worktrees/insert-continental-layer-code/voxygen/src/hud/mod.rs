@@ -1,0 +1,5946 @@
+#![expect(non_local_definitions)] // because of WidgetCommon derive
+mod animation;
+mod bag;
+mod buffs;
+mod change_notification;
+mod chat;
+mod crafting;
+mod diary;
+mod esc_menu;
+mod group;
+mod hotbar;
+mod loot_scroller;
+mod map;
+mod minimap;
+mod overhead;
+mod overitem;
+mod popup;
+mod prompt_dialog;
+mod quest;
+mod settings_window;
+mod skillbar;
+mod slot_grid;
+mod slots;
+mod social;
+mod subtitles;
+mod trade;
+
+pub mod controller_icons;
+pub mod img_ids;
+pub mod item_imgs;
+pub mod tutorial;
+pub mod util;
+
+pub use chat::MessageBacklog;
+pub use crafting::CraftingTab;
+pub use hotbar::{SlotContents as HotbarSlotContents, State as HotbarState};
+pub use item_imgs::animate_by_pulse;
+pub use loot_scroller::LootMessage;
+pub use settings_window::ScaleChange;
+pub use subtitles::Subtitle;
+
+use bag::BagManager;
+use buffs::BuffsBar;
+use change_notification::{ChangeNotification, NotificationReason};
+use chat::Chat;
+use chrono::NaiveTime;
+use crafting::Crafting;
+use diary::{Diary, SelectedSkillTree};
+use esc_menu::EscMenu;
+use group::Group;
+use img_ids::Imgs;
+use item_imgs::ItemImgs;
+use loot_scroller::LootScroller;
+use map::Map;
+use minimap::{MiniMap, VoxelMinimap};
+use popup::Popup;
+use prompt_dialog::PromptDialog;
+use quest::Quest;
+use serde::{Deserialize, Serialize};
+use settings_window::{SettingsTab, SettingsWindow};
+use skillbar::Skillbar;
+use slot_grid::SlotGrid;
+use social::Social;
+use subtitles::Subtitles;
+use trade::Trade;
+use tutorial::{DynamicTutorial, Tutorial};
+
+use crate::{
+    GlobalState,
+    audio::ActiveChannels,
+    ecs::comp::{self as vcomp, HpFloater, HpFloaterList},
+    game_input::GameInput,
+    hud::{img_ids::ImgsRot, prompt_dialog::DialogOutcomeEvent},
+    key_state::KeyState,
+    render::UiDrawer,
+    scene::{
+        SceneData,
+        camera::{self, Camera},
+    },
+    session::{
+        interactable::{self, BlockInteraction, EntityInteraction},
+        settings_change::{
+            Audio, Chat as ChatChange, Interface as InterfaceChange, Inventory, SettingsChange,
+        },
+    },
+    settings::chat::ChatFilter,
+    ui::{
+        Graphic, Ingameable, ScaleMode, Ui,
+        fonts::Fonts,
+        img_ids::Rotations,
+        slot::{self, SlotKey},
+    },
+    window::{Event as WinEvent, MenuInput},
+};
+use client::{Client, UserNotification};
+use common::{
+    combat,
+    comp::{
+        self, BuffData, BuffKind, Content, Health, Item, MapMarkerChange, PickupItem, PresenceKind,
+        ability::{AuxiliaryAbility, Stance},
+        fluid_dynamics,
+        inventory::{
+            CollectFailedReason, InventorySortOrder,
+            slot::{InvSlotId, Slot},
+            trade_pricing::TradePricing,
+        },
+        item::{
+            ItemDefinitionIdOwned, ItemDesc, ItemI18n, MaterialStatManifest, Quality,
+            tool::ToolKind,
+        },
+        loot_owner::LootOwnerKind,
+        skillset::{SkillGroupKind, SkillsPersistenceError, skills::Skill},
+    },
+    consts::{MAX_NPCINTERACT_RANGE, MAX_PICKUP_RANGE},
+    link::Is,
+    mounting::{Mount, Rider, VolumePos},
+    outcome::Outcome,
+    recipe::RecipeBookManifest,
+    resources::{BattleMode, Secs, Time},
+    rtsim,
+    slowjob::SlowJobPool,
+    terrain::{Block, SpriteKind, TerrainChunk, UnlockKind},
+    trade::{ReducedInventory, TradeAction},
+    uid::Uid,
+    util::{Dir, srgba_to_linear},
+    vol::RectRasterableVol,
+};
+use common_base::{prof_span, span};
+use common_net::{msg::world_msg::SiteId, sync::WorldSyncExt};
+use conrod_core::{
+    Color, Colorable, Labelable, Positionable, Sizeable, Widget,
+    text::cursor::Index,
+    widget::{self, Button, Image, Rectangle, Text},
+    widget_ids,
+};
+use hashbrown::{HashMap, HashSet};
+use i18n::Localization;
+use rand::RngExt;
+use specs::{Entity as EcsEntity, Join, LendJoin, WorldExt};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    cmp::Ordering,
+    collections::VecDeque,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tracing::{instrument, trace, warn};
+use vek::*;
+
+const TEXT_COLOR: Color = Color::Rgba(1.0, 1.0, 1.0, 1.0);
+const TEXT_VELORITE: Color = Color::Rgba(0.0, 0.66, 0.66, 1.0);
+const TEXT_BLUE_COLOR: Color = Color::Rgba(0.8, 0.9, 1.0, 1.0);
+const TEXT_GRAY_COLOR: Color = Color::Rgba(0.5, 0.5, 0.5, 1.0);
+const TEXT_DULL_RED_COLOR: Color = Color::Rgba(0.56, 0.2, 0.2, 1.0);
+const TEXT_BG: Color = Color::Rgba(0.0, 0.0, 0.0, 1.0);
+const TEXT_COLOR_GREY: Color = Color::Rgba(1.0, 1.0, 1.0, 0.5);
+//const TEXT_COLOR_2: Color = Color::Rgba(0.0, 0.0, 0.0, 1.0);
+const TEXT_COLOR_3: Color = Color::Rgba(1.0, 1.0, 1.0, 0.1);
+const TEXT_BIND_CONFLICT_COLOR: Color = Color::Rgba(1.0, 0.0, 0.0, 1.0);
+const BLACK: Color = Color::Rgba(0.0, 0.0, 0.0, 1.0);
+//const BG_COLOR: Color = Color::Rgba(1.0, 1.0, 1.0, 0.8);
+const HP_COLOR: Color = Color::Rgba(0.33, 0.63, 0.0, 1.0);
+const LOW_HP_COLOR: Color = Color::Rgba(0.93, 0.59, 0.03, 1.0);
+const CRITICAL_HP_COLOR: Color = Color::Rgba(0.79, 0.19, 0.17, 1.0);
+const STAMINA_COLOR: Color = Color::Rgba(0.29, 0.62, 0.75, 0.9);
+const ENEMY_HP_COLOR: Color = Color::Rgba(0.93, 0.1, 0.29, 1.0);
+const XP_COLOR: Color = Color::Rgba(0.59, 0.41, 0.67, 1.0);
+const POISE_COLOR: Color = Color::Rgba(0.70, 0.0, 0.60, 1.0);
+const POISEBAR_TICK_COLOR: Color = Color::Rgba(0.70, 0.90, 0.0, 1.0);
+//const TRANSPARENT: Color = Color::Rgba(0.0, 0.0, 0.0, 0.0);
+//const FOCUS_COLOR: Color = Color::Rgba(1.0, 0.56, 0.04, 1.0);
+//const RAGE_COLOR: Color = Color::Rgba(0.5, 0.04, 0.13, 1.0);
+const BUFF_COLOR: Color = Color::Rgba(0.06, 0.69, 0.12, 1.0);
+const DEBUFF_COLOR: Color = Color::Rgba(0.79, 0.19, 0.17, 1.0);
+
+// Item Quality Colors
+const QUALITY_LOW: Color = Color::Rgba(0.60, 0.60, 0.60, 1.0); // Grey - Trash, can be sold to vendors
+const QUALITY_COMMON: Color = Color::Rgba(0.79, 1.00, 1.00, 1.0); // Light blue - Crafting mats, food, starting equipment, quest items (like
+// keys), rewards for easy quests
+const QUALITY_MODERATE: Color = Color::Rgba(0.06, 0.69, 0.12, 1.0); // Green - Quest Rewards, commonly looted items from NPCs
+const QUALITY_HIGH: Color = Color::Rgba(0.18, 0.32, 0.9, 1.0); // Blue - Dungeon rewards, boss loot, rewards for hard quests
+const QUALITY_EPIC: Color = Color::Rgba(0.58, 0.29, 0.93, 1.0); // Purple - Rewards for epic quests and very hard bosses
+const QUALITY_LEGENDARY: Color = Color::Rgba(0.92, 0.76, 0.0, 1.0); // Gold - Legendary items that require a big effort to acquire
+const QUALITY_ARTIFACT: Color = Color::Rgba(0.74, 0.24, 0.11, 1.0); // Orange - Not obtainable by normal means, "artifacts"
+const QUALITY_DEBUG: Color = Color::Rgba(0.79, 0.19, 0.17, 1.0); // Red - Admin and debug items
+
+// Chat Colors
+/// Color for chat command errors (yellow !)
+const ERROR_COLOR: Color = Color::Rgba(1.0, 1.0, 0.0, 1.0);
+/// Color for chat command info (blue i)
+const INFO_COLOR: Color = Color::Rgba(0.28, 0.83, 0.71, 1.0);
+/// Online color
+const ONLINE_COLOR: Color = Color::Rgba(0.3, 1.0, 0.3, 1.0);
+/// Offline color
+const OFFLINE_COLOR: Color = Color::Rgba(1.0, 0.3, 0.3, 1.0);
+/// Color for a private message from another player
+const TELL_COLOR: Color = Color::Rgba(0.98, 0.71, 1.0, 1.0);
+/// Color for local chat
+const SAY_COLOR: Color = Color::Rgba(1.0, 0.8, 0.8, 1.0);
+/// Color for group chat
+const GROUP_COLOR: Color = Color::Rgba(0.47, 0.84, 1.0, 1.0);
+/// Color for factional chat
+const FACTION_COLOR: Color = Color::Rgba(0.24, 1.0, 0.48, 1.0);
+/// Color for regional chat
+const REGION_COLOR: Color = Color::Rgba(0.8, 1.0, 0.8, 1.0);
+/// Color for death messagesw
+const KILL_COLOR: Color = Color::Rgba(1.0, 0.17, 0.17, 1.0);
+/// Color for global messages
+const WORLD_COLOR: Color = Color::Rgba(0.95, 1.0, 0.95, 1.0);
+
+//Nametags
+const GROUP_MEMBER: Color = Color::Rgba(0.47, 0.84, 1.0, 1.0);
+const DEFAULT_NPC: Color = Color::Rgba(1.0, 1.0, 1.0, 1.0);
+const MARKED_NPC: Color = Color::Rgba(1.0, 0.8, 0.0, 1.0);
+
+// UI Color-Theme
+const UI_MAIN: Color = Color::Rgba(0.61, 0.70, 0.70, 1.0); // Greenish Blue
+const UI_SUBTLE: Color = Color::Rgba(0.2, 0.24, 0.24, 1.0); // Dark Greenish Blue
+//const UI_MAIN: Color = Color::Rgba(0.1, 0.1, 0.1, 0.97); // Dark
+const UI_HIGHLIGHT_0: Color = Color::Rgba(0.79, 1.09, 1.09, 1.0);
+// Pull-Down menu BG color
+const MENU_BG: Color = Color::Rgba(0.1, 0.12, 0.12, 1.0);
+//const UI_DARK_0: Color = Color::Rgba(0.25, 0.37, 0.37, 1.0);
+
+/// Distance at which nametags are visible for group members
+const NAMETAG_GROUP_RANGE: f32 = 1000.0;
+/// Distance at which nametags are visible
+const NAMETAG_RANGE: f32 = 40.0;
+/// Time nametags stay visible after doing damage even if they are out of range
+/// in seconds
+const NAMETAG_DMG_TIME: f32 = 60.0;
+/// Range damaged triggered nametags can be seen
+const NAMETAG_DMG_RANGE: f32 = 120.0;
+/// Range to display speech-bubbles at
+const SPEECH_BUBBLE_RANGE: f32 = NAMETAG_RANGE;
+const EXP_FLOATER_LIFETIME: f32 = 2.0;
+const EXP_ACCUMULATION_DURATION: f32 = 0.5;
+
+// TODO: Don't hard code this
+pub fn default_water_color() -> Rgba<f32> { srgba_to_linear(Rgba::new(0.0, 0.18, 0.37, 1.0)) }
+
+widget_ids! {
+    struct Ids {
+        // Crosshair
+        crosshair_inner,
+        crosshair_outer,
+        crosshair_charge,
+
+        // SCT
+        player_scts[],
+        player_sct_bgs[],
+        player_rank_up,
+        player_rank_up_txt_number,
+        player_rank_up_txt_0,
+        player_rank_up_txt_0_bg,
+        player_rank_up_txt_1,
+        player_rank_up_txt_1_bg,
+        player_rank_up_icon,
+        hurt_bg,
+        death_bg,
+        sct_bgs[],
+        scts[],
+
+        overheads[],
+        overitems[],
+
+        // Game Version
+        version,
+
+        // Debug
+        debug_bg,
+        fps_counter,
+        ping,
+        coordinates,
+        velocity,
+        glide_ratio,
+        glide_aoe,
+        air_vel,
+        orientation,
+        look_direction,
+        loaded_distance,
+        time,
+        entity_count,
+        num_chunks,
+        num_lights,
+        num_figures,
+        num_particles,
+        current_biome,
+        current_site,
+        graphics_backend,
+        gpu_timings[],
+        weather,
+        song_info,
+        active_channels,
+
+        // Help
+        help,
+        debug_info,
+
+        // External
+        chat,
+        loot_scroller,
+        map,
+        world_map,
+        popup,
+        minimap,
+        prompt_dialog,
+        bag,
+        trade,
+        social,
+        quest,
+        diary,
+        skillbar,
+        buttons,
+        buffs,
+        esc_menu,
+        social_window,
+        quest_window,
+        tutorial_window,
+        crafting_window,
+        settings_window,
+        group_window,
+        property_panel,
+        property_close,
+        property_title,
+        property_subtitle,
+        property_header,
+        property_details_bg,
+        property_purchase,
+        property_status,
+        property_details,
+        property_row_0,
+        property_row_1,
+        property_row_2,
+        property_row_3,
+        property_row_4,
+        subtitles,
+
+        // Free look indicator
+        free_look_txt,
+        free_look_bg,
+
+        // Auto walk indicator
+        auto_walk_txt,
+        auto_walk_bg,
+
+        // Temporal (fading) camera zoom lock indicator
+        zoom_lock_txt,
+        zoom_lock_bg,
+
+        // Camera clamp indicator
+        camera_clamp_txt,
+        camera_clamp_bg,
+
+        // Tutorial
+        quest_bg,
+        q_headline_bg,
+        q_headline,
+        q_text_bg,
+        q_text,
+        accept_button,
+        intro_button,
+        tut_arrow,
+        tut_arrow_txt_bg,
+        tut_arrow_txt,
+    }
+}
+
+/// Specifier to use with `Position::position`
+/// Read its documentation for more
+// TODO: extend as you need it
+#[derive(Clone, Copy)]
+pub enum PositionSpecifier {
+    // Place the widget near other widget with the given margins
+    TopLeftWithMarginsOn(widget::Id, f64, f64),
+    TopRightWithMarginsOn(widget::Id, f64, f64),
+    MidBottomWithMarginOn(widget::Id, f64),
+    BottomLeftWithMarginsOn(widget::Id, f64, f64),
+    BottomRightWithMarginsOn(widget::Id, f64, f64),
+    // Place the widget near other widget with given margin
+    MidTopWithMarginOn(widget::Id, f64),
+    // Place the widget near other widget at given distance
+    MiddleOf(widget::Id),
+    UpFrom(widget::Id, f64),
+    DownFrom(widget::Id, f64),
+    LeftFrom(widget::Id, f64),
+    RightFrom(widget::Id, f64),
+}
+
+/// Trait which enables you to declare widget position
+/// to use later on widget creation.
+/// It is implemented for all widgets which are implement Positionable,
+/// so you can easily change your code to use this method.
+///
+/// Consider this example:
+/// ```text
+///     let slot1 = slot_maker
+///         .fabricate(hotbar::Slot::One, [40.0; 2])
+///         .filled_slot(self.imgs.skillbar_slot)
+///         .bottom_left_with_margins_on(state.ids.frame, 0.0, 0.0);
+///     if condition {
+///         call_slot1(slot1);
+///     } else {
+///         call_slot2(slot1);
+///     }
+///     let slot2 = slot_maker
+///         .fabricate(hotbar::Slot::Two, [40.0; 2])
+///         .filled_slot(self.imgs.skillbar_slot)
+///         .right_from(state.ids.slot1, slot_offset);
+///     if condition {
+///         call_slot1(slot2);
+///     } else {
+///         call_slot2(slot2);
+///     }
+/// ```
+/// Despite being identical, you can't easily deduplicate code
+/// which uses slot1 and slot2 as they are calling methods to position itself.
+/// This can be solved if you declare position and use it later like so
+/// ```text
+/// let slots = [
+///     (hotbar::Slot::One, BottomLeftWithMarginsOn(state.ids.frame, 0.0, 0.0)),
+///     (hotbar::Slot::Two, RightFrom(state.ids.slot1, slot_offset)),
+/// ];
+/// for (slot, pos) in slots {
+///     let slot = slot_maker
+///         .fabricate(slot, [40.0; 2])
+///         .filled_slot(self.imgs.skillbar_slot)
+///         .position(pos);
+///     if condition {
+///         call_slot1(slot);
+///     } else {
+///         call_slot2(slot);
+///     }
+/// }
+/// ```
+pub trait Position {
+    #[must_use]
+    fn position(self, request: PositionSpecifier) -> Self;
+}
+
+impl<W: Positionable> Position for W {
+    fn position(self, request: PositionSpecifier) -> Self {
+        match request {
+            // Place the widget near other widget with the given margins
+            PositionSpecifier::TopLeftWithMarginsOn(other, top, left) => {
+                self.top_left_with_margins_on(other, top, left)
+            },
+            PositionSpecifier::TopRightWithMarginsOn(other, top, right) => {
+                self.top_right_with_margins_on(other, top, right)
+            },
+            PositionSpecifier::MidBottomWithMarginOn(other, margin) => {
+                self.mid_bottom_with_margin_on(other, margin)
+            },
+            PositionSpecifier::BottomRightWithMarginsOn(other, bottom, right) => {
+                self.bottom_right_with_margins_on(other, bottom, right)
+            },
+            PositionSpecifier::BottomLeftWithMarginsOn(other, bottom, left) => {
+                self.bottom_left_with_margins_on(other, bottom, left)
+            },
+            // Place the widget near other widget with given margin
+            PositionSpecifier::MidTopWithMarginOn(other, margin) => {
+                self.mid_top_with_margin_on(other, margin)
+            },
+            // Place the widget near other widget at given distance
+            PositionSpecifier::MiddleOf(other) => self.middle_of(other),
+            PositionSpecifier::UpFrom(other, offset) => self.up_from(other, offset),
+            PositionSpecifier::DownFrom(other, offset) => self.down_from(other, offset),
+            PositionSpecifier::LeftFrom(other, offset) => self.left_from(other, offset),
+            PositionSpecifier::RightFrom(other, offset) => self.right_from(other, offset),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BuffIconKind {
+    Buff {
+        kind: BuffKind,
+        data: BuffData,
+        multiplicity: usize,
+    },
+    Stance(Stance),
+}
+
+impl BuffIconKind {
+    pub fn image(&self, imgs: &Imgs) -> conrod_core::image::Id {
+        match self {
+            Self::Buff { kind, .. } => get_buff_image(*kind, imgs),
+            Self::Stance(stance) => util::ability_image(imgs, stance.pseudo_ability_id()),
+        }
+    }
+
+    pub fn max_duration(&self) -> Option<Secs> {
+        match self {
+            Self::Buff { data, .. } => data.duration,
+            Self::Stance(_) => None,
+        }
+    }
+
+    pub fn title_description<'b>(
+        &self,
+        localized_strings: &'b Localization,
+    ) -> (Cow<'b, str>, Cow<'b, str>) {
+        match self {
+            Self::Buff {
+                kind,
+                data,
+                multiplicity: _,
+            } => (
+                util::get_buff_title(*kind, localized_strings),
+                util::get_buff_desc(*kind, *data, localized_strings),
+            ),
+            Self::Stance(stance) => {
+                util::ability_description(stance.pseudo_ability_id(), localized_strings)
+            },
+        }
+    }
+}
+
+impl PartialOrd for BuffIconKind {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+
+impl Ord for BuffIconKind {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (
+                BuffIconKind::Buff { kind, .. },
+                BuffIconKind::Buff {
+                    kind: other_kind, ..
+                },
+            ) => kind.cmp(other_kind),
+            (BuffIconKind::Buff { .. }, BuffIconKind::Stance(_)) => Ordering::Greater,
+            (BuffIconKind::Stance(_), BuffIconKind::Buff { .. }) => Ordering::Less,
+            (BuffIconKind::Stance(stance), BuffIconKind::Stance(stance_other)) => {
+                stance.cmp(stance_other)
+            },
+        }
+    }
+}
+
+impl PartialEq for BuffIconKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                BuffIconKind::Buff { kind, .. },
+                BuffIconKind::Buff {
+                    kind: other_kind, ..
+                },
+            ) => kind == other_kind,
+            (BuffIconKind::Stance(stance), BuffIconKind::Stance(stance_other)) => {
+                stance == stance_other
+            },
+            _ => false,
+        }
+    }
+}
+
+impl Eq for BuffIconKind {}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BuffIcon {
+    kind: BuffIconKind,
+    is_buff: bool,
+    end_time: Option<f64>,
+}
+
+impl BuffIcon {
+    pub fn multiplicity(&self) -> usize {
+        match self.kind {
+            BuffIconKind::Buff { multiplicity, .. } => multiplicity,
+            BuffIconKind::Stance(_) => 1,
+        }
+    }
+
+    pub fn get_buff_time(&self, time: Time) -> String {
+        if let Some(end) = self.end_time {
+            format!("{:.0}s", end - time.0)
+        } else {
+            "".to_string()
+        }
+    }
+
+    pub fn icons_vec(buffs: &comp::Buffs, stance: Option<&comp::Stance>) -> Vec<Self> {
+        buffs
+            .iter_active()
+            .filter_map(BuffIcon::from_buffs)
+            .chain(stance.and_then(BuffIcon::from_stance))
+            .collect::<Vec<_>>()
+    }
+
+    fn from_stance(stance: &comp::Stance) -> Option<Self> {
+        let stance = if let Stance::None = stance {
+            return None;
+        } else {
+            stance
+        };
+        Some(BuffIcon {
+            kind: BuffIconKind::Stance(*stance),
+            is_buff: true,
+            end_time: None,
+        })
+    }
+
+    fn from_buffs<'b, I: Iterator<Item = &'b comp::Buff>>(buffs: I) -> Option<Self> {
+        let (buff, count) = buffs.fold((None, 0), |(strongest, count), buff| {
+            (strongest.or(Some(buff)), count + 1)
+        });
+        let buff = buff?;
+        Some(Self {
+            kind: BuffIconKind::Buff {
+                kind: buff.kind,
+                data: buff.data,
+                multiplicity: count,
+            },
+            is_buff: buff.kind.is_buff(),
+            end_time: buff.end_time.map(|end| end.0),
+        })
+    }
+}
+
+pub struct ExpFloater {
+    pub owner: Uid,
+    pub exp_change: u32,
+    pub timer: f32,
+    pub jump_timer: f32,
+    pub rand_offset: (f32, f32),
+    pub xp_pools: HashSet<SkillGroupKind>,
+}
+
+pub struct SkillPointGain {
+    pub skill_tree: SkillGroupKind,
+    pub total_points: u16,
+    pub timer: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ComboFloater {
+    pub combo: u32,
+    pub timer: f64,
+}
+
+pub struct BlockFloater {
+    pub timer: f32,
+}
+
+pub struct DebugInfo {
+    pub tps: f64,
+    pub frame_time: Duration,
+    pub frame_variance: Duration,
+    pub ping_ms: f64,
+    pub coordinates: Option<comp::Pos>,
+    pub velocity: Option<comp::Vel>,
+    pub ori: Option<comp::Ori>,
+    pub character_state: Option<comp::CharacterState>,
+    pub look_dir: Dir,
+    pub in_fluid: Option<comp::Fluid>,
+    pub num_chunks: u32,
+    pub num_lights: u32,
+    pub num_visible_chunks: u32,
+    pub num_shadow_chunks: u32,
+    pub num_figures: u32,
+    pub num_figures_visible: u32,
+    pub num_particles: u32,
+    pub num_particles_visible: u32,
+    pub current_track: String,
+    pub current_artist: String,
+    pub active_channels: ActiveChannels,
+    pub audio_cpu_usage: f32,
+}
+
+pub struct HudInfo<'a> {
+    pub is_aiming: bool,
+    pub active_mine_tool: Option<ToolKind>,
+    pub is_first_person: bool,
+    pub viewpoint_entity: specs::Entity,
+    pub mutable_viewpoint: bool,
+    pub target_entity: Option<specs::Entity>,
+    pub selected_entity: Option<(specs::Entity, Instant)>,
+    pub persistence_load_error: Option<SkillsPersistenceError>,
+    pub key_state: &'a KeyState,
+}
+
+#[derive(Clone)]
+pub enum Event {
+    SendMessage(String),
+    SendCommand(String, Vec<String>),
+
+    CharacterSelection,
+    UseSlot {
+        slot: comp::slot::Slot,
+        bypass_dialog: bool,
+    },
+    SwapEquippedWeapons,
+    SwapSlots {
+        slot_a: comp::slot::Slot,
+        slot_b: comp::slot::Slot,
+        bypass_dialog: bool,
+    },
+    SplitSwapSlots {
+        slot_a: comp::slot::Slot,
+        slot_b: comp::slot::Slot,
+        bypass_dialog: bool,
+    },
+    DropSlot(comp::slot::Slot),
+    SplitDropSlot(comp::slot::Slot),
+    SortInventory(InventorySortOrder),
+    ChangeHotbarState(Box<HotbarState>),
+    TradeAction(TradeAction),
+    Ability {
+        idx: usize,
+        state: bool,
+    },
+    Logout,
+    Quit,
+
+    CraftRecipe {
+        recipe_name: String,
+        craft_sprite: Option<(VolumePos, SpriteKind)>,
+        amount: u32,
+    },
+    SalvageItem {
+        slot: InvSlotId,
+        salvage_pos: VolumePos,
+    },
+    CraftModularWeapon {
+        primary_slot: InvSlotId,
+        secondary_slot: InvSlotId,
+        craft_sprite: Option<VolumePos>,
+    },
+    CraftModularWeaponComponent {
+        toolkind: ToolKind,
+        material: InvSlotId,
+        modifier: Option<InvSlotId>,
+        craft_sprite: Option<VolumePos>,
+    },
+    RepairItem {
+        item: Slot,
+        sprite_pos: VolumePos,
+    },
+    InviteMember(Uid),
+    AcceptInvite,
+    DeclineInvite,
+    KickMember(Uid),
+    LeaveGroup,
+    AssignLeader(Uid),
+    RemoveBuff(BuffKind),
+    LeaveStance,
+    UnlockSkill(Skill),
+    SelectExpBar(Option<SkillGroupKind>),
+
+    RequestSiteInfo(SiteId),
+    RequestPropertyParcels,
+    PurchaseSelectedProperty,
+    ChangeAbility(usize, AuxiliaryAbility),
+
+    SettingsChange(SettingsChange),
+    AcknowledgePersistenceLoadError,
+    MapMarkerEvent(MapMarkerChange),
+    Dialogue(EcsEntity, rtsim::Dialogue),
+    SetBattleMode(BattleMode),
+}
+
+// TODO: Are these the possible layouts we want?
+// TODO: Maybe replace this with bitflags.
+// `map` is not here because it currently is displayed over the top of other
+// open windows.
+#[derive(PartialEq, Eq)]
+pub enum Windows {
+    Settings, // Display settings window.
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum CrosshairType {
+    RoundEdges,
+    Edges,
+    #[serde(other)]
+    Round,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum Intro {
+    Never,
+    #[serde(other)]
+    Show,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum XpBar {
+    OnGain,
+    #[serde(other)]
+    Always,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum BarNumbers {
+    Percent,
+    Off,
+    #[serde(other)]
+    Values,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum ShortcutNumbers {
+    Off,
+    #[serde(other)]
+    On,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum BuffPosition {
+    Map,
+    #[serde(other)]
+    Bar,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum PressBehavior {
+    Hold = 1,
+    #[serde(other)]
+    Toggle = 0,
+}
+/// Similar to [PressBehavior], with different semantics for settings that
+/// change state automatically. There is no [PressBehavior::update]
+/// implementation because it doesn't apply to the use case; this is just a
+/// sentinel.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum AutoPressBehavior {
+    Auto = 1,
+    #[serde(other)]
+    Toggle = 0,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatTab {
+    pub label: String,
+    pub filter: ChatFilter,
+}
+impl Default for ChatTab {
+    fn default() -> Self {
+        Self {
+            label: String::from("Chat"),
+            filter: ChatFilter::default(),
+        }
+    }
+}
+
+impl PressBehavior {
+    pub fn update(&self, keystate: bool, setting: &mut bool, f: impl FnOnce(bool)) {
+        match (self, keystate) {
+            // flip the state on key press in toggle mode
+            (PressBehavior::Toggle, true) => {
+                *setting ^= true;
+                f(*setting);
+            },
+            // do nothing on key release in toggle mode
+            (PressBehavior::Toggle, false) => {},
+            // set the setting to the key state in hold mode
+            (PressBehavior::Hold, state) => {
+                *setting = state;
+                f(*setting);
+            },
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct MapMarkers {
+    owned: Option<Vec2<i32>>,
+    group: HashMap<Uid, Vec2<i32>>,
+}
+
+impl MapMarkers {
+    pub fn update(&mut self, event: comp::MapMarkerUpdate) {
+        match event {
+            comp::MapMarkerUpdate::Owned(event) => match event {
+                MapMarkerChange::Update(waypoint) => self.owned = Some(waypoint),
+                MapMarkerChange::Remove => self.owned = None,
+            },
+            comp::MapMarkerUpdate::GroupMember(user, event) => match event {
+                MapMarkerChange::Update(waypoint) => {
+                    self.group.insert(user, waypoint);
+                },
+                MapMarkerChange::Remove => {
+                    self.group.remove(&user);
+                },
+            },
+            comp::MapMarkerUpdate::ClearGroup => {
+                self.group.clear();
+            },
+        }
+    }
+}
+
+/// (target slot, input value, inventory quantity, is our inventory, error,
+/// trade.offers index of trade slot)
+pub struct TradeAmountInput {
+    slot: InvSlotId,
+    input: String,
+    inv: u32,
+    ours: bool,
+    err: Option<String>,
+    who: usize,
+    input_painted: bool,
+    submit_action: Option<TradeAction>,
+}
+
+impl TradeAmountInput {
+    pub fn new(slot: InvSlotId, input: String, inv: u32, ours: bool, who: usize) -> Self {
+        Self {
+            slot,
+            input,
+            inv,
+            ours,
+            who,
+            err: None,
+            input_painted: false,
+            submit_action: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowId {
+    None,
+    Bag,
+}
+
+pub struct Show {
+    ui: bool,
+    intro: bool,
+    crafting: bool,
+    bag: bool,
+    bag_menu_split: bool,
+    bag_details: bool,
+    trade: bool,
+    trade_details: bool,
+    social: bool,
+    diary: bool,
+    group: bool,
+    quest: bool,
+    group_menu: bool,
+    esc_menu: bool,
+    open_windows: Windows,
+    map: bool,
+    ingame: bool,
+    chat_tab_settings_index: Option<usize>,
+    settings_tab: SettingsTab,
+    diary_fields: diary::DiaryShow,
+    crafting_fields: crafting::CraftingShow,
+    social_search_key: Option<String>,
+    want_grab: bool,
+    stats: bool,
+    free_look: bool,
+    auto_walk: bool,
+    zoom_lock: ChangeNotification,
+    camera_clamp: bool,
+    prompt_dialog: Option<PromptDialogSettings>,
+    trade_amount_input_key: Option<TradeAmountInput>,
+    // A stack of open menus; the menu in focus should be on top
+    focus: Vec<WindowId>,
+}
+
+impl Default for Show {
+    fn default() -> Self { Self::new() }
+}
+
+impl Show {
+    pub fn new() -> Self {
+        Self {
+            ui: true,
+            intro: false,
+            crafting: false,
+            bag: false,
+            bag_menu_split: false,
+            bag_details: false,
+            trade: false,
+            trade_details: false,
+            social: false,
+            diary: false,
+            group: false,
+            quest: false,
+            group_menu: false,
+            esc_menu: false,
+            open_windows: Windows::None,
+            map: false,
+            ingame: true,
+            chat_tab_settings_index: None,
+            settings_tab: SettingsTab::Interface,
+            diary_fields: diary::DiaryShow::default(),
+            crafting_fields: crafting::CraftingShow::default(),
+            social_search_key: None,
+            want_grab: true,
+            stats: false,
+            free_look: false,
+            auto_walk: false,
+            zoom_lock: ChangeNotification::default(),
+            camera_clamp: false,
+            prompt_dialog: None,
+            trade_amount_input_key: None,
+            focus: Vec::new(),
+        }
+    }
+
+    // Changing a window state must go through these functions
+    fn set_bag_state(&mut self, state: bool) {
+        if state {
+            self.focus.push(WindowId::Bag); // use hashset to avoid duplicates?
+            self.bag = true;
+        } else {
+            self.focus.retain(|x| *x != WindowId::Bag);
+            self.bag = false;
+        }
+    }
+
+    fn bag(&mut self, open: bool) {
+        if !self.esc_menu {
+            self.set_bag_state(open);
+            self.map = false;
+            self.crafting_fields.salvage = false;
+
+            if !open {
+                self.crafting = false;
+            }
+
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    pub fn bag_print(&self) -> bool { self.bag }
+
+    fn trade(&mut self, open: bool) {
+        if !self.esc_menu {
+            self.set_bag_state(open);
+            self.trade = open;
+            self.map = false;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    fn map(&mut self, open: bool) {
+        if !self.esc_menu {
+            self.map = open;
+            self.set_bag_state(false);
+            self.crafting = false;
+            self.crafting_fields.salvage = false;
+            self.social = false;
+            self.quest = false;
+            self.diary = false;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    fn social(&mut self, open: bool) {
+        if !self.esc_menu {
+            if !self.social && open {
+                // rising edge detector
+                self.search_social_players(None);
+            }
+            self.social = open;
+            self.diary = false;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    fn quest(&mut self, open: bool) {
+        if !self.esc_menu {
+            self.quest = open;
+            self.diary = false;
+            self.map = false;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    fn crafting(&mut self, open: bool) {
+        if !self.esc_menu {
+            if !self.crafting && open {
+                // rising edge detector
+                self.search_crafting_recipe(None);
+            }
+            self.crafting = open;
+            self.crafting_fields.salvage = false;
+            self.crafting_fields.recipe_inputs = HashMap::new();
+            self.set_bag_state(open);
+            self.map = false;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    pub fn open_crafting_tab(
+        &mut self,
+        tab: CraftingTab,
+        craft_sprite: Option<(VolumePos, SpriteKind)>,
+    ) {
+        self.selected_crafting_tab(tab);
+        self.crafting(true);
+        self.crafting_fields.craft_sprite = self.crafting_fields.craft_sprite.or(craft_sprite);
+        self.crafting_fields.salvage = matches!(
+            self.crafting_fields.craft_sprite,
+            Some((_, SpriteKind::DismantlingBench))
+        ) && matches!(tab, CraftingTab::Dismantle);
+        self.crafting_fields.initialize_repair = matches!(
+            self.crafting_fields.craft_sprite,
+            Some((_, SpriteKind::RepairBench))
+        );
+    }
+
+    fn diary(&mut self, open: bool) {
+        if !self.esc_menu {
+            self.social = false;
+            self.quest = false;
+            self.crafting = false;
+            self.crafting_fields.salvage = false;
+            self.set_bag_state(false);
+            self.map = false;
+            self.diary_fields = diary::DiaryShow::default();
+            self.diary = open;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    fn settings(&mut self, open: bool) {
+        if !self.esc_menu {
+            self.open_windows = if open {
+                Windows::Settings
+            } else {
+                Windows::None
+            };
+            self.set_bag_state(false);
+            self.social = false;
+            self.quest = false;
+            self.crafting = false;
+            self.crafting_fields.salvage = false;
+            self.diary = false;
+            self.want_grab = !self.any_window_requires_cursor();
+        }
+    }
+
+    fn toggle_trade(&mut self) { self.trade(!self.trade); }
+
+    fn toggle_map(&mut self) { self.map(!self.map) }
+
+    fn toggle_social(&mut self) { self.social(!self.social); }
+
+    fn toggle_crafting(&mut self) { self.crafting(!self.crafting) }
+
+    fn toggle_diary(&mut self) { self.diary(!self.diary) }
+
+    fn toggle_ui(&mut self) { self.ui = !self.ui; }
+
+    fn toggle_settings(&mut self, global_state: &GlobalState) {
+        match self.open_windows {
+            Windows::Settings => {
+                #[cfg(feature = "singleplayer")]
+                global_state.unpause();
+
+                self.settings(false);
+            },
+            _ => {
+                #[cfg(feature = "singleplayer")]
+                global_state.pause();
+
+                self.settings(true)
+            },
+        };
+        #[cfg(not(feature = "singleplayer"))]
+        let _global_state = global_state;
+    }
+
+    // TODO: Add self updating key-bindings element
+
+    fn any_window_requires_cursor(&self) -> bool {
+        self.bag
+            || self.trade
+            || self.esc_menu
+            || self.map
+            || self.social
+            || self.crafting
+            || self.diary
+            || self.intro
+            || self.quest
+            || !matches!(self.open_windows, Windows::None)
+    }
+
+    fn toggle_windows(&mut self, global_state: &mut GlobalState) {
+        if self.any_window_requires_cursor() {
+            self.set_bag_state(false);
+            self.trade = false;
+            self.esc_menu = false;
+            self.intro = false;
+            self.map = false;
+            self.social = false;
+            self.quest = false;
+            self.diary = false;
+            self.crafting = false;
+            self.open_windows = Windows::None;
+            self.want_grab = true;
+
+            // Unpause the game if we are on singleplayer
+            #[cfg(feature = "singleplayer")]
+            global_state.unpause();
+        } else {
+            self.esc_menu = true;
+            self.want_grab = false;
+
+            // Pause the game if we are on singleplayer
+            #[cfg(feature = "singleplayer")]
+            global_state.pause();
+        }
+        #[cfg(not(feature = "singleplayer"))]
+        let _global_state = global_state;
+    }
+
+    fn open_setting_tab(&mut self, tab: SettingsTab) {
+        self.open_windows = Windows::Settings;
+        self.esc_menu = false;
+        self.settings_tab = tab;
+        self.set_bag_state(false);
+        self.want_grab = false;
+    }
+
+    fn open_skill_tree(&mut self, tree_sel: SelectedSkillTree) {
+        self.diary_fields.skilltreetab = tree_sel;
+        self.social = false;
+    }
+
+    fn selected_crafting_tab(&mut self, sel_cat: CraftingTab) {
+        self.crafting_fields.crafting_tab = sel_cat;
+    }
+
+    fn search_crafting_recipe(&mut self, search_key: Option<String>) {
+        self.crafting_fields.crafting_search_key = search_key;
+    }
+
+    fn search_social_players(&mut self, search_key: Option<String>) {
+        self.social_search_key = search_key;
+    }
+}
+
+pub struct PromptDialogSettings {
+    message: String,
+    affirmative_event: Event,
+    negative_option: bool,
+    negative_event: Option<Event>,
+    outcome_via_keypress: Option<bool>,
+}
+
+impl PromptDialogSettings {
+    pub fn new(message: String, affirmative_event: Event, negative_event: Option<Event>) -> Self {
+        Self {
+            message,
+            affirmative_event,
+            negative_option: true,
+            negative_event,
+            outcome_via_keypress: None,
+        }
+    }
+
+    pub fn set_outcome_via_keypress(&mut self, outcome: bool) {
+        self.outcome_via_keypress = Some(outcome);
+    }
+
+    #[must_use]
+    pub fn with_no_negative_option(mut self) -> Self {
+        self.negative_option = false;
+        self
+    }
+}
+
+pub struct Floaters {
+    pub exp_floaters: Vec<ExpFloater>,
+    pub skill_point_displays: Vec<SkillPointGain>,
+    pub combo_floater: Option<ComboFloater>,
+    pub block_floaters: Vec<BlockFloater>,
+}
+
+#[derive(Clone)]
+pub enum HudLootOwner {
+    Name(Content),
+    Group,
+    Unknown,
+}
+
+#[derive(Clone)]
+pub enum HudCollectFailedReason {
+    InventoryFull,
+    LootOwned {
+        owner: HudLootOwner,
+        expiry_secs: u64,
+    },
+}
+
+impl HudCollectFailedReason {
+    pub fn from_server_reason(reason: &CollectFailedReason, ecs: &specs::World) -> Self {
+        match reason {
+            CollectFailedReason::InventoryFull => HudCollectFailedReason::InventoryFull,
+            CollectFailedReason::LootOwned { owner, expiry_secs } => {
+                let owner = match owner {
+                    LootOwnerKind::Player(owner_uid) => {
+                        let maybe_owner_name = ecs.entity_from_uid(*owner_uid).and_then(|entity| {
+                            ecs.read_storage::<comp::Stats>()
+                                .get(entity)
+                                .map(|stats| stats.name.clone())
+                        });
+
+                        if let Some(name) = maybe_owner_name {
+                            HudLootOwner::Name(name)
+                        } else {
+                            HudLootOwner::Unknown
+                        }
+                    },
+                    LootOwnerKind::Group(_) => HudLootOwner::Group,
+                };
+
+                HudCollectFailedReason::LootOwned {
+                    owner,
+                    expiry_secs: *expiry_secs,
+                }
+            },
+        }
+    }
+}
+#[derive(Clone)]
+pub struct CollectFailedData {
+    pulse: f32,
+    reason: HudCollectFailedReason,
+}
+
+impl CollectFailedData {
+    pub fn new(pulse: f32, reason: HudCollectFailedReason) -> Self { Self { pulse, reason } }
+}
+
+/// Stores HUD related state which should be persisted even if the HUD is
+/// temporarily hidden (by ie. going to the character screen).
+#[derive(Default)]
+pub struct PersistedHudState {
+    /// Stores messages sent while the chat is hidden (either disabled in the
+    /// HUD state, or by being outside of the HUD).
+    ///
+    /// This is needed because messages in [`Hud::new_messages`] are also shown
+    /// as new chat bubbles, so `new_messages` must be cleared every frame.
+    pub message_backlog: MessageBacklog,
+    pub location_markers: MapMarkers,
+}
+
+pub struct Hud {
+    ui: Ui,
+    ids: Ids,
+    world_map: (/* Id */ Vec<Rotations>, Vec2<u32>),
+    imgs: Imgs,
+    item_imgs: ItemImgs,
+    item_i18n: ItemI18n,
+    fonts: Fonts,
+    rot_imgs: ImgsRot,
+    failed_block_pickups: HashMap<VolumePos, CollectFailedData>,
+    failed_entity_pickups: HashMap<EcsEntity, CollectFailedData>,
+    new_loot_messages: VecDeque<LootMessage>,
+    new_messages: VecDeque<comp::ChatMsg>,
+    new_notifications: VecDeque<UserNotification>,
+    speech_bubbles: HashMap<Uid, comp::SpeechBubble>,
+    content_bubbles: Vec<(Vec3<f32>, comp::SpeechBubble)>,
+    pub persisted_state: Rc<RefCell<PersistedHudState>>,
+    pub show: Show,
+    to_focus: Option<Option<widget::Id>>,
+    force_ungrab: bool,
+    force_chat_input: Option<String>,
+    force_chat_cursor: Option<Index>,
+    tab_complete: Option<String>,
+    pulse: f32,
+    hp_pulse: f32,
+    slot_manager: slots::SlotManager,
+    hotbar: hotbar::State,
+    events: Vec<Event>,
+    menu_events: Vec<MenuInput>,
+    crosshair_opacity: f32,
+    floaters: Floaters,
+    voxel_minimap: VoxelMinimap,
+    map_drag: Vec2<f64>,
+    force_chat: bool,
+    clear_chat: bool,
+    current_dialogue: Option<(EcsEntity, Instant, rtsim::Dialogue<true>)>,
+    extra_markers: Vec<map::ExtraMarker>,
+    property_parcels: Vec<common_net::msg::PropertyParcelInfo>,
+    property_panel_open: bool,
+    property_selected: Option<usize>,
+    property_status: Option<String>,
+}
+
+impl Hud {
+    pub fn new(
+        global_state: &mut GlobalState,
+        persisted_state: Rc<RefCell<PersistedHudState>>,
+        client: &Client,
+    ) -> Self {
+        let window = &mut global_state.window;
+        let settings = &global_state.settings;
+
+        let mut ui = Ui::new(window).unwrap();
+        ui.set_scaling_mode(settings.interface.ui_scale);
+        // Generate ids.
+        let ids = Ids::new(ui.id_generator());
+        // Load world map
+        let mut layers = Vec::new();
+        for layer in client.world_data().map_layers() {
+            // NOTE: Use a border the same color as the LOD ocean color (but with a
+            // translucent alpha since UI have transparency and LOD doesn't).
+            layers.push(ui.add_graphic_with_rotations(Graphic::Image(
+                Arc::clone(layer),
+                Some(default_water_color()),
+            )));
+        }
+        let world_map = (layers, client.world_data().chunk_size().map(|e| e as u32));
+        // Load images.
+        let imgs = Imgs::load(&mut ui).expect("Failed to load images!");
+        // Load rotation images.
+        let rot_imgs = ImgsRot::load(&mut ui).expect("Failed to load rot images!");
+        // Load item images.
+        let item_imgs = ItemImgs::new(&mut ui, imgs.not_found);
+        // Load item text ("reference" to name and description)
+        let item_i18n = ItemI18n::new_expect();
+        // Load fonts.
+        let fonts = Fonts::load(global_state.i18n.read().fonts(), &mut ui)
+            .expect("Impossible to load fonts!");
+        // Get the server name.
+        let server = &client.server_info().name;
+        // Get the id, unwrap is safe because this CANNOT be None at this
+        // point.
+
+        let character_id = match client.presence().unwrap() {
+            PresenceKind::Character(id) => Some(id),
+            PresenceKind::LoadingCharacter(id) => Some(id),
+            PresenceKind::Spectator => None,
+            PresenceKind::Possessor => None,
+        };
+
+        // Create a new HotbarState from the persisted slots.
+        let hotbar_state =
+            HotbarState::new(global_state.profile.get_hotbar_slots(server, character_id));
+
+        let slot_manager = slots::SlotManager::new(
+            ui.id_generator(),
+            Vec2::broadcast(40.0),
+            global_state.settings.interface.slots_use_prefixes,
+            global_state.settings.interface.slots_prefix_switch_point,
+            // TODO(heyzoos) Will be useful for whoever works on rendering the number of items
+            // "in hand".
+            // fonts.cyri.conrod_id,
+            // Vec2::new(1.0, 1.0),
+            // fonts.cyri.scale(12),
+            // TEXT_COLOR,
+        );
+
+        Self {
+            voxel_minimap: VoxelMinimap::new(&mut ui),
+            ui,
+            imgs,
+            world_map,
+            rot_imgs,
+            item_imgs,
+            item_i18n,
+            fonts,
+            ids,
+            failed_block_pickups: HashMap::default(),
+            failed_entity_pickups: HashMap::default(),
+            new_loot_messages: VecDeque::new(),
+            new_messages: VecDeque::new(),
+            new_notifications: VecDeque::new(),
+            persisted_state,
+            speech_bubbles: HashMap::new(),
+            content_bubbles: Vec::new(),
+            show: Show::new(),
+            to_focus: None,
+            force_ungrab: false,
+            force_chat_input: None,
+            force_chat_cursor: None,
+            tab_complete: None,
+            pulse: 0.0,
+            hp_pulse: 0.0,
+            slot_manager,
+            hotbar: hotbar_state,
+            events: Vec::new(),
+            menu_events: Vec::new(),
+            crosshair_opacity: 0.0,
+            floaters: Floaters {
+                exp_floaters: Vec::new(),
+                skill_point_displays: Vec::new(),
+                combo_floater: None,
+                block_floaters: Vec::new(),
+            },
+            map_drag: Vec2::zero(),
+            force_chat: false,
+            clear_chat: false,
+            current_dialogue: None,
+            extra_markers: Vec::new(),
+            property_parcels: Vec::new(),
+            property_panel_open: false,
+            property_selected: None,
+            property_status: None,
+        }
+    }
+
+    pub fn clear_chat(&mut self) { self.clear_chat = true; }
+
+    pub fn set_prompt_dialog(&mut self, prompt_dialog: PromptDialogSettings) {
+        self.show.prompt_dialog = Some(prompt_dialog);
+    }
+
+    pub fn update_fonts(&mut self, i18n: &Localization) {
+        self.fonts = Fonts::load(i18n.fonts(), &mut self.ui).expect("Impossible to load fonts!");
+    }
+
+    pub fn set_slots_use_prefixes(&mut self, use_prefixes: bool) {
+        self.slot_manager.set_use_prefixes(use_prefixes);
+    }
+
+    pub fn set_slots_prefix_switch_point(&mut self, prefix_switch_point: u32) {
+        self.slot_manager
+            .set_prefix_switch_point(prefix_switch_point);
+    }
+
+    pub fn current_dialogue(&self) -> Option<EcsEntity> {
+        self.current_dialogue.as_ref().map(|(e, _, _)| *e)
+    }
+
+    #[expect(clippy::single_match)] // TODO: Pending review in #587
+    fn update_layout(
+        &mut self,
+        client: &Client,
+        global_state: &mut GlobalState,
+        debug_info: &Option<DebugInfo>,
+        dt: Duration,
+        info: HudInfo,
+        camera: &Camera,
+        (entity_interactables, block_interactables): (
+            HashMap<specs::Entity, Vec<interactable::EntityInteraction>>,
+            HashMap<VolumePos, (Block, Vec<&interactable::BlockInteraction>)>,
+        ),
+    ) -> Vec<Event> {
+        span!(_guard, "update_layout", "Hud::update_layout");
+        let mut events = core::mem::take(&mut self.events);
+        if global_state.settings.interface.map_show_voxel_map {
+            self.voxel_minimap.maintain(client, &mut self.ui);
+        }
+        let scale = self.ui.scale();
+        let (ui_widgets, item_tooltip_manager, tooltip_manager) = &mut self.ui.set_widgets();
+        // self.ui.set_item_widgets(); pulse time for pulsating elements
+        self.pulse += dt.as_secs_f32();
+        // FPS
+        let fps = global_state.clock.stats().average_tps;
+        let version = format!("Veloren {}", *common::util::DISPLAY_VERSION);
+        let i18n = &global_state.i18n.read();
+
+        if self.property_panel_open {
+            Rectangle::fill_with([760.0, 620.0], Color::Rgba(0.035, 0.045, 0.06, 0.985))
+                .mid_top_with_margin_on(ui_widgets.window, 24.0)
+                .set(self.ids.property_panel, ui_widgets);
+
+            Rectangle::fill_with([760.0, 86.0], UI_SUBTLE)
+                .top_left_with_margins_on(self.ids.property_panel, 0.0, 0.0)
+                .set(self.ids.property_header, ui_widgets);
+            Text::new("Property Marketplace")
+                .top_left_with_margins_on(self.ids.property_panel, 18.0, 24.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(28))
+                .color(TEXT_COLOR)
+                .set(self.ids.property_title, ui_widgets);
+
+            Text::new("Browse land, review its location, and manage properties linked to your wallet.")
+                .top_left_with_margins_on(self.ids.property_panel, 52.0, 22.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(14))
+                .color(TEXT_COLOR_GREY)
+                .set(self.ids.property_subtitle, ui_widgets);
+
+            for (index, parcel) in self.property_parcels.iter().take(5).enumerate() {
+                let availability = if parcel.placed_buildings < parcel.max_buildings {
+                    if parcel.is_owned {
+                        "Owned"
+                    } else {
+                        "Available"
+                    }
+                } else {
+                    "At capacity"
+                };
+                let text = format!(
+                    "{}\n{}  •  {}/{} buildings  •  {}",
+                    parcel.name,
+                    parcel.land_type,
+                    parcel.placed_buildings,
+                    parcel.max_buildings,
+                    availability
+                );
+                let row_id = match index {
+                    0 => self.ids.property_row_0,
+                    1 => self.ids.property_row_1,
+                    2 => self.ids.property_row_2,
+                    3 => self.ids.property_row_3,
+                    _ => self.ids.property_row_4,
+                };
+                let selected = self.property_selected == Some(index);
+                if Button::new()
+                    .top_left_with_margins_on(
+                        self.ids.property_panel,
+                        102.0 + index as f64 * 66.0,
+                        18.0,
+                    )
+                    .w_h(330.0, 58.0)
+                    .label(&text)
+                    .color(if selected { UI_MAIN } else { Color::Rgba(0.08, 0.10, 0.12, 1.0) })
+                    .label_font_id(self.fonts.cyri.conrod_id)
+                    .label_font_size(self.fonts.cyri.scale(15))
+                    .label_color(if selected { BLACK } else { TEXT_COLOR })
+                    .set(row_id, ui_widgets)
+                    .was_clicked()
+                {
+                    self.property_selected = Some(index);
+                }
+            }
+
+            if let Some(index) = self.property_selected
+                && let Some(parcel) = self.property_parcels.get(index)
+            {
+                let width = parcel.max_x - parcel.min_x;
+                let height = parcel.max_y - parcel.min_y;
+                let available_slots = parcel.max_buildings.saturating_sub(parcel.placed_buildings);
+                Rectangle::fill_with([382.0, 400.0], Color::Rgba(0.07, 0.08, 0.10, 1.0))
+                    .top_left_with_margins_on(self.ids.property_panel, 102.0, 360.0)
+                    .set(self.ids.property_details_bg, ui_widgets);
+                let details = format!(
+                    "{}\n{}  •  {} land\n\nCONTINENT\n{}\n\nREGION\n{}\n\nWORLD LOCATION\n{} ({}, {}) to ({}, {})\n\nPARCEL SIZE\n{} x {} ({})\n\nBUILDING CAPACITY\n{} / {}  •  {} available\n\nSTATUS\n{}\n\nPRICE\n{} lamports\n\nBUILDINGS\n{}",
+                    parcel.name,
+                    parcel.land_type,
+                    parcel.size_label,
+                    parcel.continent,
+                    parcel.region,
+                    parcel.world_id,
+                    parcel.min_x,
+                    parcel.min_y,
+                    parcel.max_x,
+                    parcel.max_y,
+                    width,
+                    height,
+                    parcel.size_label,
+                    parcel.placed_buildings,
+                    parcel.max_buildings,
+                    available_slots,
+                    if available_slots > 0 {
+                        if parcel.is_owned {
+                            "Owned"
+                        } else {
+                            "Available"
+                        }
+                    } else {
+                        "At capacity"
+                    },
+                    parcel.price_lamports,
+                    parcel.allowed_buildings.join(", ")
+                );
+                Text::new(&details)
+                    .top_left_with_margins_on(self.ids.property_panel, 122.0, 380.0)
+                    .w(340.0)
+                    .font_id(self.fonts.cyri.conrod_id)
+                    .font_size(self.fonts.cyri.scale(15))
+                    .color(TEXT_COLOR)
+                    .set(self.ids.property_details, ui_widgets);
+
+                if let Some(status) = &self.property_status {
+                    Text::new(status)
+                        .bottom_left_with_margins_on(self.ids.property_panel, 54.0, 22.0)
+                        .w(700.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(14))
+                        .color(TEXT_COLOR_GREY)
+                        .set(self.ids.property_status, ui_widgets);
+                }
+
+                let action_label = if parcel.is_owned {
+                    "Manage Property"
+                } else {
+                    "Request Purchase"
+                };
+                if Button::new()
+                    .w_h(190.0, 38.0)
+                    .bottom_left_with_margins_on(self.ids.property_panel, 16.0, 16.0)
+                    .label(action_label)
+                    .label_font_id(self.fonts.cyri.conrod_id)
+                    .label_font_size(self.fonts.cyri.scale(15))
+                    .label_color(if parcel.is_owned { TEXT_COLOR } else { BLACK })
+                    .set(self.ids.property_purchase, ui_widgets)
+                    .was_clicked()
+                    && !parcel.is_owned
+                {
+                    events.push(Event::PurchaseSelectedProperty);
+                }
+            }
+
+            if Button::new()
+                .w_h(100.0, 38.0)
+                .bottom_right_with_margins_on(self.ids.property_panel, 16.0, 16.0)
+                .label("Close")
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .label_font_size(self.fonts.cyri.scale(16))
+                .label_color(BLACK)
+                .set(self.ids.property_close, ui_widgets)
+                .was_clicked()
+            {
+                self.property_panel_open = false;
+            }
+        }
+
+        if self.show.ingame {
+            prof_span!("ingame elements");
+
+            let ecs = client.state().ecs();
+            let pos = ecs.read_storage::<comp::Pos>();
+            let stats = ecs.read_storage::<comp::Stats>();
+            let skill_sets = ecs.read_storage::<comp::SkillSet>();
+            let healths = ecs.read_storage::<Health>();
+            let hardcore = ecs.read_storage::<comp::Hardcore>();
+            let buffs = ecs.read_storage::<comp::Buffs>();
+            let energy = ecs.read_storage::<comp::Energy>();
+            let mut hp_floater_lists = ecs.write_storage::<HpFloaterList>();
+            let uids = ecs.read_storage::<Uid>();
+            let interpolated = ecs.read_storage::<vcomp::Interpolated>();
+            let scales = ecs.read_storage::<comp::Scale>();
+            let bodies = ecs.read_storage::<comp::Body>();
+            let items = ecs.read_storage::<PickupItem>();
+            let inventories = ecs.read_storage::<comp::Inventory>();
+            let msm = ecs.read_resource::<MaterialStatManifest>();
+            let entities = ecs.entities();
+            let me = info.viewpoint_entity;
+            let poises = ecs.read_storage::<comp::Poise>();
+            let is_mounts = ecs.read_storage::<Is<Mount>>();
+            let is_riders = ecs.read_storage::<Is<Rider>>();
+            let stances = ecs.read_storage::<comp::Stance>();
+            let char_activities = ecs.read_storage::<comp::CharacterActivity>();
+            let time = ecs.read_resource::<Time>();
+            let id_maps = ecs.read_resource::<common::uid::IdMaps>();
+            let terrain = ecs.read_resource::<common::terrain::TerrainGrid>();
+            let colliders = ecs.read_storage::<comp::Collider>();
+            let char_states = ecs.read_storage::<comp::CharacterState>();
+
+            // Check if there was a persistence load error of the skillset, and if so
+            // display a dialog prompt
+            if self.show.prompt_dialog.is_none()
+                && let Some(persistence_error) = info.persistence_load_error
+            {
+                let persistence_error = match persistence_error {
+                    SkillsPersistenceError::HashMismatch => "hud-skill-persistence-hash_mismatch",
+                    SkillsPersistenceError::DeserializationFailure => {
+                        "hud-skill-persistence-deserialization_failure"
+                    },
+                    SkillsPersistenceError::SpentExpMismatch => {
+                        "hud-skill-persistence-spent_experience_missing"
+                    },
+                    SkillsPersistenceError::SkillsUnlockFailed => {
+                        "hud-skill-persistence-skills_unlock_failed"
+                    },
+                };
+                let persistence_error = global_state
+                    .i18n
+                    .read()
+                    .get_content(&Content::localized(persistence_error));
+
+                let common_message = global_state
+                    .i18n
+                    .read()
+                    .get_content(&Content::localized("hud-skill-persistence-common_message"));
+
+                warn!("{}\n{}", persistence_error, common_message);
+                // TODO: Let the player see the more detailed message `persistence_error`?
+                let prompt_dialog = PromptDialogSettings::new(
+                    format!("{}\n", common_message),
+                    Event::AcknowledgePersistenceLoadError,
+                    None,
+                )
+                .with_no_negative_option();
+                // self.set_prompt_dialog(prompt_dialog);
+                self.show.prompt_dialog = Some(prompt_dialog);
+            }
+
+            if (client.pending_trade().is_some() && !self.show.trade)
+                || (client.pending_trade().is_none() && self.show.trade)
+            {
+                self.show.toggle_trade();
+            }
+
+            //self.input = client.read_storage::<comp::ControllerInputs>();
+            if let Some(health) = healths.get(me) {
+                // Hurt Frame
+                let hp_percentage = health.current() / health.maximum() * 100.0;
+                self.hp_pulse += dt.as_secs_f32() * 10.0 / hp_percentage.clamp(3.0, 7.0);
+                if hp_percentage < 10.0 && !health.is_dead {
+                    let hurt_fade = (self.hp_pulse).sin() * 0.5 + 0.6; //Animation timer
+                    Image::new(self.imgs.hurt_bg)
+                        .wh_of(ui_widgets.window)
+                        .middle_of(ui_widgets.window)
+                        .graphics_for(ui_widgets.window)
+                        .color(Some(Color::Rgba(1.0, 1.0, 1.0, hurt_fade)))
+                        .set(self.ids.hurt_bg, ui_widgets);
+                }
+
+                // Version info
+                Text::new(&version)
+                    .font_id(self.fonts.cyri.conrod_id)
+                    .font_size(self.fonts.cyri.scale(11))
+                    .color(TEXT_COLOR)
+                    .mid_top_with_margin_on(ui_widgets.window, 2.0)
+                    .set(self.ids.version, ui_widgets);
+
+                // Death Frame
+                if health.is_dead {
+                    Image::new(self.imgs.death_bg)
+                        .wh_of(ui_widgets.window)
+                        .middle_of(ui_widgets.window)
+                        .graphics_for(ui_widgets.window)
+                        .color(Some(Color::Rgba(0.0, 0.0, 0.0, 1.0)))
+                        .set(self.ids.death_bg, ui_widgets);
+                }
+                // Crosshair
+                let show_crosshair = (info.is_aiming || info.is_first_person) && !health.is_dead;
+                self.crosshair_opacity = Lerp::lerp(
+                    self.crosshair_opacity,
+                    if show_crosshair { 1.0 } else { 0.0 },
+                    5.0 * dt.as_secs_f32(),
+                );
+
+                Image::new(
+                    // TODO: Do we want to match on this every frame?
+                    match global_state.settings.interface.crosshair_type {
+                        CrosshairType::Round => self.imgs.crosshair_outer_round,
+                        CrosshairType::RoundEdges => self.imgs.crosshair_outer_round_edges,
+                        CrosshairType::Edges => self.imgs.crosshair_outer_edges,
+                    },
+                )
+                .w_h(21.0 * 1.5, 21.0 * 1.5)
+                .middle_of(ui_widgets.window)
+                .color(Some(Color::Rgba(
+                    1.0,
+                    1.0,
+                    1.0,
+                    self.crosshair_opacity * global_state.settings.interface.crosshair_opacity,
+                )))
+                .set(self.ids.crosshair_outer, ui_widgets);
+                Image::new(self.imgs.crosshair_inner)
+                    .w_h(21.0 * 2.0, 21.0 * 2.0)
+                    .middle_of(self.ids.crosshair_outer)
+                    .color(Some(Color::Rgba(1.0, 1.0, 1.0, 0.6)))
+                    .set(self.ids.crosshair_inner, ui_widgets);
+
+                if let Some(charge) = char_states.get(me).and_then(|cs| cs.charge_frac()) {
+                    Image::new(match charge {
+                        _ if charge > 0.999 => self.imgs.crosshair_charge_8,
+                        _ if charge > 0.875 => self.imgs.crosshair_charge_7,
+                        _ if charge > 0.75 => self.imgs.crosshair_charge_6,
+                        _ if charge > 0.625 => self.imgs.crosshair_charge_5,
+                        _ if charge > 0.5 => self.imgs.crosshair_charge_4,
+                        _ if charge > 0.375 => self.imgs.crosshair_charge_3,
+                        _ if charge > 0.25 => self.imgs.crosshair_charge_2,
+                        _ if charge > 0.125 => self.imgs.crosshair_charge_1,
+                        _ => self.imgs.crosshair_charge_0,
+                    })
+                    .w_h(21.0 * 1.5, 21.0 * 1.5)
+                    .middle_of(ui_widgets.window)
+                    .color(Some(Color::Rgba(
+                        1.0,
+                        1.0,
+                        1.0,
+                        self.crosshair_opacity * global_state.settings.interface.crosshair_opacity,
+                    )))
+                    .set(self.ids.crosshair_charge, ui_widgets);
+                }
+            }
+
+            // Max amount the sct font size increases when "flashing"
+            const FLASH_MAX: u32 = 2;
+
+            // Get player position.
+            let player_pos = client
+                .state()
+                .ecs()
+                .read_storage::<comp::Pos>()
+                .get(client.entity())
+                .map_or(Vec3::zero(), |pos| pos.0);
+            // SCT Output values are called hp_damage and floater.info.amount
+            // Numbers are currently divided by 10 and rounded
+            if global_state.settings.interface.sct {
+                // Render Player SCT numbers
+                let mut player_sct_bg_id_walker = self.ids.player_sct_bgs.walk();
+                let mut player_sct_id_walker = self.ids.player_scts.walk();
+                if let (Some(HpFloaterList { floaters, .. }), Some(health)) = (
+                    hp_floater_lists
+                        .get_mut(me)
+                        .filter(|fl| !fl.floaters.is_empty()),
+                    healths.get(me),
+                ) {
+                    let player_font_col = |precise: bool| {
+                        if precise {
+                            Rgb::new(1.0, 0.9, 0.0)
+                        } else {
+                            Rgb::new(1.0, 0.1, 0.0)
+                        }
+                    };
+
+                    fn calc_fade(floater: &HpFloater) -> f32 {
+                        ((crate::ecs::sys::floater::MY_HP_SHOWTIME - floater.timer) * 0.25) + 0.2
+                    }
+
+                    floaters.retain(|fl| calc_fade(fl) > 0.0);
+
+                    for floater in floaters {
+                        let number_speed = 50.0; // Player number speed
+                        let player_sct_bg_id = player_sct_bg_id_walker.next(
+                            &mut self.ids.player_sct_bgs,
+                            &mut ui_widgets.widget_id_generator(),
+                        );
+                        let player_sct_id = player_sct_id_walker.next(
+                            &mut self.ids.player_scts,
+                            &mut ui_widgets.widget_id_generator(),
+                        );
+                        // Clamp the amount so you don't have absurdly large damage numbers
+                        let max_hp_frac = floater
+                            .info
+                            .amount
+                            .abs()
+                            .clamp(Health::HEALTH_EPSILON, health.maximum() * 1.25)
+                            / health.maximum();
+                        let hp_dmg_text = if floater.info.amount.abs() < 0.1 {
+                            String::new()
+                        } else if global_state.settings.interface.sct_damage_rounding
+                            && floater.info.amount.abs() >= 1.0
+                        {
+                            format!("{:.0}", floater.info.amount.abs())
+                        } else {
+                            format!("{:.1}", floater.info.amount.abs())
+                        };
+                        let precise = floater.info.precise;
+
+                        // Timer sets text transparency
+                        let hp_fade = calc_fade(floater);
+
+                        // Increase font size based on fraction of maximum health
+                        // "flashes" by having a larger size in the first 100ms
+                        let font_size =
+                            30 + (if precise {
+                                (max_hp_frac * 10.0) as u32 * 3 + 10
+                            } else {
+                                (max_hp_frac * 10.0) as u32 * 3
+                            }) + if floater.jump_timer < 0.1 {
+                                FLASH_MAX
+                                    * (((1.0 - floater.jump_timer * 10.0)
+                                        * 10.0
+                                        * if precise { 1.25 } else { 1.0 })
+                                        as u32)
+                            } else {
+                                0
+                            };
+                        let font_col = player_font_col(precise);
+                        // Timer sets the widget offset
+                        let y = if floater.info.amount < 0.0 {
+                            floater.timer as f64
+                                * number_speed
+                                * floater.info.amount.signum() as f64
+                                //* -1.0
+                                + 300.0
+                                - ui_widgets.win_h * 0.5
+                        } else {
+                            -(floater.timer as f64
+                                * number_speed
+                                * floater.info.amount.signum() as f64)
+                                + 300.0
+                                - ui_widgets.win_h * 0.5
+                        };
+                        // Healing is offset randomly
+                        let x = if floater.info.amount < 0.0 {
+                            0.0
+                        } else {
+                            (floater.rand as f64 - 0.5) * 0.08 * ui_widgets.win_w
+                                + (0.03 * ui_widgets.win_w * (floater.rand as f64 - 0.5).signum())
+                        };
+                        Text::new(&hp_dmg_text)
+                            .font_size(font_size)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(Color::Rgba(0.0, 0.0, 0.0, hp_fade))
+                            .x_y(x, y - 3.0)
+                            .set(player_sct_bg_id, ui_widgets);
+                        Text::new(&hp_dmg_text)
+                            .font_size(font_size)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(if floater.info.amount < 0.0 {
+                                Color::Rgba(font_col.r, font_col.g, font_col.b, hp_fade)
+                            } else {
+                                Color::Rgba(0.1, 1.0, 0.1, hp_fade)
+                            })
+                            .x_y(x, y)
+                            .set(player_sct_id, ui_widgets);
+                    }
+                }
+                // EXP Numbers
+                self.floaters.exp_floaters.iter_mut().for_each(|f| {
+                    f.timer -= dt.as_secs_f32();
+                    f.jump_timer += dt.as_secs_f32();
+                });
+                self.floaters.exp_floaters.retain(|f| f.timer > 0.0);
+                for floater in self.floaters.exp_floaters.iter_mut() {
+                    let number_speed = 50.0; // Number Speed for Single EXP
+                    let player_sct_bg_id = player_sct_bg_id_walker.next(
+                        &mut self.ids.player_sct_bgs,
+                        &mut ui_widgets.widget_id_generator(),
+                    );
+                    let player_sct_id = player_sct_id_walker.next(
+                        &mut self.ids.player_scts,
+                        &mut ui_widgets.widget_id_generator(),
+                    );
+                    /*let player_sct_icon_id = player_sct_id_walker.next(
+                        &mut self.ids.player_scts,
+                        &mut ui_widgets.widget_id_generator(),
+                    );*/
+                    // Increase font size based on fraction of maximum Experience
+                    // "flashes" by having a larger size in the first 100ms
+                    let font_size_xp = 30
+                        + ((floater.exp_change as f32 / 300.0).min(1.0) * 50.0) as u32
+                        + if floater.jump_timer < 0.1 {
+                            FLASH_MAX * (((1.0 - floater.jump_timer * 10.0) * 10.0) as u32)
+                        } else {
+                            0
+                        };
+                    let y = floater.timer as f64 * number_speed; // Timer sets the widget offset
+                    //let fade = ((4.0 - floater.timer as f32) * 0.25) + 0.2; // Timer sets
+                    // text transparency
+                    let fade = floater.timer.min(1.0);
+
+                    if floater.exp_change > 0 {
+                        let xp_pool = &floater.xp_pools;
+                        let exp_string =
+                            &i18n.get_msg_ctx("hud-sct-experience", &i18n::fluent_args! {
+                                // Don't show 0 Exp
+                                "amount" => &floater.exp_change.max(1),
+                            });
+                        Text::new(exp_string)
+                            .font_size(font_size_xp)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(Color::Rgba(0.0, 0.0, 0.0, fade))
+                            .x_y(
+                                ui_widgets.win_w * (0.5 * floater.rand_offset.0 as f64 - 0.25),
+                                ui_widgets.win_h * (0.15 * floater.rand_offset.1 as f64) + y - 3.0,
+                            )
+                            .set(player_sct_bg_id, ui_widgets);
+                        Text::new(exp_string)
+                            .font_size(font_size_xp)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(
+                                if xp_pool.contains(&SkillGroupKind::Weapon(ToolKind::Pick)) {
+                                    Color::Rgba(0.18, 0.32, 0.9, fade)
+                                } else {
+                                    Color::Rgba(0.59, 0.41, 0.67, fade)
+                                },
+                            )
+                            .x_y(
+                                ui_widgets.win_w * (0.5 * floater.rand_offset.0 as f64 - 0.25),
+                                ui_widgets.win_h * (0.15 * floater.rand_offset.1 as f64) + y,
+                            )
+                            .set(player_sct_id, ui_widgets);
+                        // Exp Source Image (TODO: fix widget id crash)
+                        /*if xp_pool.contains(&SkillGroupKind::Weapon(ToolKind::Pick)) {
+                            Image::new(self.imgs.pickaxe_ico)
+                                .w_h(font_size_xp as f64, font_size_xp as f64)
+                                .left_from(player_sct_id, 5.0)
+                                .set(player_sct_icon_id, ui_widgets);
+                        }*/
+                    }
+                }
+
+                // Skill points
+                self.floaters
+                    .skill_point_displays
+                    .iter_mut()
+                    .for_each(|f| f.timer -= dt.as_secs_f32());
+                self.floaters
+                    .skill_point_displays
+                    .retain(|d| d.timer > 0_f32);
+                if let Some(display) = self.floaters.skill_point_displays.first_mut() {
+                    let fade = if display.timer < 3.0 {
+                        display.timer * 0.33
+                    } else if display.timer < 2.0 {
+                        display.timer * 0.33 * 0.1
+                    } else {
+                        1.0
+                    };
+                    // Background image
+                    let offset = if display.timer < 2.0 {
+                        300.0 - (display.timer as f64 - 2.0) * -300.0
+                    } else {
+                        300.0
+                    };
+                    Image::new(self.imgs.level_up)
+                        .w_h(328.0, 126.0)
+                        .mid_top_with_margin_on(ui_widgets.window, offset)
+                        .graphics_for(ui_widgets.window)
+                        .color(Some(Color::Rgba(1.0, 1.0, 1.0, fade)))
+                        .set(self.ids.player_rank_up, ui_widgets);
+                    // Rank Number
+                    let rank = display.total_points;
+                    let fontsize = match rank {
+                        1..=99 => (20, 8.0),
+                        100..=999 => (18, 9.0),
+                        1000..=9999 => (17, 10.0),
+                        _ => (14, 12.0),
+                    };
+                    Text::new(&format!("{}", rank))
+                        .font_size(fontsize.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(1.0, 1.0, 1.0, fade))
+                        .mid_top_with_margin_on(self.ids.player_rank_up, fontsize.1)
+                        .set(self.ids.player_rank_up_txt_number, ui_widgets);
+                    // Static "New Rank!" text
+                    Text::new(&i18n.get_msg("hud-rank_up"))
+                        .font_size(40)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(0.0, 0.0, 0.0, fade))
+                        .mid_bottom_with_margin_on(self.ids.player_rank_up, 20.0)
+                        .set(self.ids.player_rank_up_txt_0_bg, ui_widgets);
+                    Text::new(&i18n.get_msg("hud-rank_up"))
+                        .font_size(40)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(1.0, 1.0, 1.0, fade))
+                        .bottom_left_with_margins_on(self.ids.player_rank_up_txt_0_bg, 2.0, 2.0)
+                        .set(self.ids.player_rank_up_txt_0, ui_widgets);
+                    // Variable skilltree text
+                    let skill = match display.skill_tree {
+                        General => i18n.get_msg("common-weapons-general"),
+                        Weapon(ToolKind::Hammer) => i18n.get_msg("common-weapons-hammer"),
+                        Weapon(ToolKind::Axe) => i18n.get_msg("common-weapons-axe"),
+                        Weapon(ToolKind::Sword) => i18n.get_msg("common-weapons-sword"),
+                        Weapon(ToolKind::Sceptre) => i18n.get_msg("common-weapons-sceptre"),
+                        Weapon(ToolKind::Bow) => i18n.get_msg("common-weapons-bow"),
+                        Weapon(ToolKind::Staff) => i18n.get_msg("common-weapons-staff"),
+                        Weapon(ToolKind::Pick) => i18n.get_msg("common-tool-mining"),
+                        _ => Cow::Borrowed("Unknown"),
+                    };
+                    Text::new(&skill)
+                        .font_size(20)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(0.0, 0.0, 0.0, fade))
+                        .mid_top_with_margin_on(self.ids.player_rank_up, 45.0)
+                        .set(self.ids.player_rank_up_txt_1_bg, ui_widgets);
+                    Text::new(&skill)
+                        .font_size(20)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(1.0, 1.0, 1.0, fade))
+                        .bottom_left_with_margins_on(self.ids.player_rank_up_txt_1_bg, 2.0, 2.0)
+                        .set(self.ids.player_rank_up_txt_1, ui_widgets);
+                    // Variable skilltree icon
+                    use crate::hud::SkillGroupKind::{General, Weapon};
+                    Image::new(match display.skill_tree {
+                        General => self.imgs.swords_crossed,
+                        Weapon(ToolKind::Hammer) => self.imgs.hammer,
+                        Weapon(ToolKind::Axe) => self.imgs.axe,
+                        Weapon(ToolKind::Sword) => self.imgs.sword,
+                        Weapon(ToolKind::Sceptre) => self.imgs.sceptre,
+                        Weapon(ToolKind::Bow) => self.imgs.bow,
+                        Weapon(ToolKind::Staff) => self.imgs.staff,
+                        Weapon(ToolKind::Pick) => self.imgs.mining,
+                        _ => self.imgs.swords_crossed,
+                    })
+                    .w_h(20.0, 20.0)
+                    .left_from(self.ids.player_rank_up_txt_1_bg, 5.0)
+                    .color(Some(Color::Rgba(1.0, 1.0, 1.0, fade)))
+                    .set(self.ids.player_rank_up_icon, ui_widgets);
+                }
+
+                // Scrolling Combat Text for Parrying an attack
+                self.floaters
+                    .block_floaters
+                    .iter_mut()
+                    .for_each(|f| f.timer -= dt.as_secs_f32());
+                self.floaters.block_floaters.retain(|f| f.timer > 0_f32);
+                for floater in self.floaters.block_floaters.iter_mut() {
+                    let number_speed = 50.0;
+                    let player_sct_bg_id = player_sct_bg_id_walker.next(
+                        &mut self.ids.player_sct_bgs,
+                        &mut ui_widgets.widget_id_generator(),
+                    );
+                    let player_sct_id = player_sct_id_walker.next(
+                        &mut self.ids.player_scts,
+                        &mut ui_widgets.widget_id_generator(),
+                    );
+                    let font_size = 30;
+                    let y = floater.timer as f64 * number_speed; // Timer sets the widget offset
+                    // text transparency
+                    let fade = if floater.timer < 0.25 {
+                        floater.timer / 0.25
+                    } else {
+                        1.0
+                    };
+
+                    Text::new(&i18n.get_msg("hud-sct-block"))
+                        .font_size(font_size)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(0.0, 0.0, 0.0, fade))
+                        .x_y(
+                            ui_widgets.win_w * (0.0),
+                            ui_widgets.win_h * (-0.3) + y - 3.0,
+                        )
+                        .set(player_sct_bg_id, ui_widgets);
+                    Text::new(&i18n.get_msg("hud-sct-block"))
+                        .font_size(font_size)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .color(Color::Rgba(0.69, 0.82, 0.88, fade))
+                        .x_y(ui_widgets.win_w * 0.0, ui_widgets.win_h * -0.3 + y)
+                        .set(player_sct_id, ui_widgets);
+                }
+            }
+
+            // Pop speech bubbles
+            let now = Instant::now();
+            self.speech_bubbles
+                .retain(|_uid, bubble| bubble.timeout > now);
+            self.content_bubbles
+                .retain(|(_pos, bubble)| bubble.timeout > now);
+
+            // Don't show messages from muted players
+            self.new_messages
+                .retain(|msg| !chat::is_muted(client, &global_state.profile, msg));
+
+            // Push speech bubbles
+            for msg in self.new_messages.iter() {
+                global_state.profile.tutorial.event_chat_msg(msg);
+                if let Some((bubble, uid)) = msg.to_bubble() {
+                    self.speech_bubbles.insert(uid, bubble);
+                }
+            }
+
+            let mut overhead_walker = self.ids.overheads.walk();
+            let mut overitem_walker = self.ids.overitems.walk();
+            let mut sct_walker = self.ids.scts.walk();
+            let mut sct_bg_walker = self.ids.sct_bgs.walk();
+            let pulse = self.pulse;
+
+            let make_overitem =
+                |item: &PickupItem, pos, distance, properties, fonts, interaction_options| {
+                    let quality = get_quality_col(item.quality());
+
+                    // Item
+                    overitem::Overitem::new(
+                        util::describe(item, i18n, &self.item_i18n).into(),
+                        quality,
+                        distance,
+                        fonts,
+                        i18n,
+                        properties,
+                        pulse,
+                        interaction_options,
+                        &self.imgs,
+                        global_state,
+                    )
+                    .x_y(0.0, 100.0)
+                    .position_ingame(pos)
+                };
+
+            self.failed_block_pickups
+                .retain(|_, t| pulse - t.pulse < overitem::PICKUP_FAILED_FADE_OUT_TIME);
+            self.failed_entity_pickups
+                .retain(|_, t| pulse - t.pulse < overitem::PICKUP_FAILED_FADE_OUT_TIME);
+
+            // Render overitem: name, etc.
+            for (entity, pos, item, distance) in (&entities, &pos, &items)
+                .join()
+                .map(|(entity, pos, item)| (entity, pos, item, pos.0.distance_squared(player_pos)))
+                .filter(|(_, _, _, distance)| distance < &MAX_PICKUP_RANGE.powi(2))
+            {
+                let overitem_id = overitem_walker.next(
+                    &mut self.ids.overitems,
+                    &mut ui_widgets.widget_id_generator(),
+                );
+
+                make_overitem(
+                    item,
+                    pos.0 + Vec3::unit_z() * 1.2,
+                    distance,
+                    overitem::OveritemProperties {
+                        active: entity_interactables.contains_key(&entity),
+                        pickup_failed_pulse: self.failed_entity_pickups.get(&entity).cloned(),
+                    },
+                    &self.fonts,
+                    vec![(
+                        Some(GameInput::Interact),
+                        i18n.get_msg("hud-pick_up").to_string(),
+                        overitem::TEXT_COLOR,
+                    )],
+                )
+                .set(overitem_id, ui_widgets);
+            }
+
+            // Render overitem for interactable blocks
+            for (mat, pos, interactions, block) in
+                block_interactables
+                    .iter()
+                    .filter_map(|(position, (block, interactions))| {
+                        position
+                            .get_block_and_transform(
+                                &terrain,
+                                &id_maps,
+                                // Use the visual position of voxel collider entity
+                                |e| {
+                                    interpolated.get(e).map(|interpolated| {
+                                        (comp::Pos(interpolated.pos), interpolated.ori)
+                                    })
+                                },
+                                &colliders,
+                            )
+                            .map(|(mat, _)| (mat, *position, interactions, *block))
+                    })
+            {
+                let overitem_id = overitem_walker.next(
+                    &mut self.ids.overitems,
+                    &mut ui_widgets.widget_id_generator(),
+                );
+
+                let overitem_properties = overitem::OveritemProperties {
+                    active: true,
+                    pickup_failed_pulse: self.failed_block_pickups.get(&pos).cloned(),
+                };
+
+                let pos = mat.mul_point(Vec3::broadcast(0.5));
+                let over_pos = pos + Vec3::unit_z() * 0.7;
+
+                let interaction_text = |interaction: &BlockInteraction| match interaction {
+                    BlockInteraction::Collect { steal } => (
+                        Some(GameInput::Interact),
+                        i18n.get_msg(if *steal { "hud-steal" } else { "hud-collect" })
+                            .to_string(),
+                        if *steal {
+                            overitem::NEGATIVE_TEXT_COLOR
+                        } else {
+                            overitem::TEXT_COLOR
+                        },
+                    ),
+                    BlockInteraction::Craft(_) => (
+                        Some(GameInput::Interact),
+                        i18n.get_msg("hud-use").to_string(),
+                        overitem::TEXT_COLOR,
+                    ),
+                    BlockInteraction::Unlock { kind, steal } => {
+                        let item_name = |item_id: &ItemDefinitionIdOwned| {
+                            // TODO: get ItemKey and use it with i18n?
+                            item_id
+                                .as_ref()
+                                .itemdef_id()
+                                .map(|id| {
+                                    let item = Item::new_from_asset_expect(id);
+                                    util::describe(&item, i18n, &self.item_i18n)
+                                })
+                                .unwrap_or_else(|| "modular item".to_string())
+                        };
+
+                        (
+                            Some(GameInput::Interact),
+                            match kind {
+                                UnlockKind::Free => i18n
+                                    .get_msg(if *steal { "hud-steal" } else { "hud-open" })
+                                    .to_string(),
+                                UnlockKind::Requires(item_id) => i18n
+                                    .get_msg_ctx(
+                                        if *steal {
+                                            "hud-steal-requires"
+                                        } else {
+                                            "hud-unlock-requires"
+                                        },
+                                        &i18n::fluent_args! {
+                                            "item" => item_name(item_id),
+                                        },
+                                    )
+                                    .to_string(),
+                                UnlockKind::Consumes(item_id) => i18n
+                                    .get_msg_ctx(
+                                        if *steal {
+                                            "hud-steal-consumes"
+                                        } else {
+                                            "hud-unlock-consumes"
+                                        },
+                                        &i18n::fluent_args! {
+                                            "item" => item_name(item_id),
+                                        },
+                                    )
+                                    .to_string(),
+                            },
+                            if *steal {
+                                overitem::NEGATIVE_TEXT_COLOR
+                            } else {
+                                overitem::TEXT_COLOR
+                            },
+                        )
+                    },
+                    BlockInteraction::Mine(mine_tool) => {
+                        match (mine_tool, &info.active_mine_tool) {
+                            (ToolKind::Pick, Some(ToolKind::Pick)) => (
+                                Some(GameInput::Primary),
+                                i18n.get_msg("hud-mine").to_string(),
+                                overitem::TEXT_COLOR,
+                            ),
+                            (ToolKind::Pick, _) => (
+                                None,
+                                i18n.get_msg("hud-mine-needs_pickaxe").to_string(),
+                                overitem::TEXT_COLOR,
+                            ),
+                            (ToolKind::Shovel, Some(ToolKind::Shovel)) => (
+                                Some(GameInput::Primary),
+                                i18n.get_msg("hud-dig").to_string(),
+                                overitem::TEXT_COLOR,
+                            ),
+                            (ToolKind::Shovel, _) => (
+                                None,
+                                i18n.get_msg("hud-mine-needs_shovel").to_string(),
+                                overitem::TEXT_COLOR,
+                            ),
+                            _ => (
+                                None,
+                                i18n.get_msg("hud-mine-needs_unhandled_case").to_string(),
+                                overitem::TEXT_COLOR,
+                            ),
+                        }
+                    },
+                    BlockInteraction::Mount => {
+                        let key = match block.get_sprite() {
+                            Some(sprite) if sprite.is_controller() => "hud-steer",
+                            Some(sprite) if sprite.is_bed() => "hud-rest",
+                            _ => "hud-sit",
+                        };
+                        (
+                            Some(GameInput::Mount),
+                            i18n.get_msg(key).to_string(),
+                            overitem::TEXT_COLOR,
+                        )
+                    },
+                    BlockInteraction::Read(_) => (
+                        Some(GameInput::Interact),
+                        i18n.get_msg("hud-read").to_string(),
+                        overitem::TEXT_COLOR,
+                    ),
+                    // TODO: change to turn on/turn off?
+                    BlockInteraction::LightToggle(enable) => (
+                        Some(GameInput::Interact),
+                        i18n.get_msg(if *enable {
+                            "hud-activate"
+                        } else {
+                            "hud-deactivate"
+                        })
+                        .to_string(),
+                        overitem::TEXT_COLOR,
+                    ),
+                };
+
+                if let Some(sprite) = block.get_sprite() {
+                    // TODO: Handle this better. The items returned from `try_reclaim_from_block`
+                    // are based on rng. We probably want some function to get only gauranteed items
+                    // from `LootSpec`.
+                    let interactable_item = if sprite.should_drop_mystery() {
+                        None
+                    } else {
+                        Item::try_reclaim_from_block(block, None).and_then(|mut items| {
+                            debug_assert!(
+                                items.len() <= 1,
+                                "The amount of items returned from Item::try_reclaim_from_block \
+                                 for non-container items must not be higher than one"
+                            );
+                            let (amount, mut item) = items.pop()?;
+                            item.set_amount(amount.clamp(1, item.max_amount())).expect(
+                                "Setting an item amount between 1 and item.max_amount() must \
+                                 succeed",
+                            );
+                            Some(item)
+                        })
+                    };
+
+                    let (desc, quality) = interactable_item.map_or_else(
+                        || (get_sprite_desc(sprite, i18n), overitem::TEXT_COLOR),
+                        |item| {
+                            (
+                                Some(util::describe(&item, i18n, &self.item_i18n).into()),
+                                get_quality_col(item.quality()),
+                            )
+                        },
+                    );
+                    let desc = desc.unwrap_or(Cow::Borrowed(""));
+                    overitem::Overitem::new(
+                        desc,
+                        quality,
+                        pos.distance_squared(player_pos),
+                        &self.fonts,
+                        i18n,
+                        overitem_properties,
+                        self.pulse,
+                        interactions
+                            .iter()
+                            .map(|interaction| interaction_text(interaction))
+                            .collect(),
+                        &self.imgs,
+                        global_state,
+                    )
+                    .x_y(0.0, 100.0)
+                    .position_ingame(over_pos)
+                    .set(overitem_id, ui_widgets);
+                }
+            }
+
+            // show hud for campfires and portals
+            for (entity, interaction) in
+                entity_interactables
+                    .iter()
+                    .filter_map(|(entity, interactions)| {
+                        interactions.iter().find_map(|interaction| {
+                            matches!(
+                                interaction,
+                                EntityInteraction::CampfireSit | EntityInteraction::ActivatePortal
+                            )
+                            .then_some((*entity, *interaction))
+                        })
+                    })
+            {
+                let overitem_id = overitem_walker.next(
+                    &mut self.ids.overitems,
+                    &mut ui_widgets.widget_id_generator(),
+                );
+
+                let overitem_properties = overitem::OveritemProperties {
+                    active: true,
+                    pickup_failed_pulse: None,
+                };
+                let pos = client
+                    .state()
+                    .ecs()
+                    .read_storage::<comp::Pos>()
+                    .get(entity)
+                    .map_or(Vec3::zero(), |e| e.0);
+                let over_pos = pos + Vec3::unit_z() * 1.5;
+
+                let (name, interaction_text) = match interaction {
+                    EntityInteraction::CampfireSit => {
+                        ("hud-crafting-campfire", "hud-waypoint_interact")
+                    },
+                    EntityInteraction::ActivatePortal => ("hud-portal", "hud-activate"),
+                    _ => unreachable!(),
+                };
+
+                overitem::Overitem::new(
+                    i18n.get_msg(name),
+                    overitem::TEXT_COLOR,
+                    pos.distance_squared(player_pos),
+                    &self.fonts,
+                    i18n,
+                    overitem_properties,
+                    self.pulse,
+                    vec![(
+                        Some(interaction.game_input()),
+                        i18n.get_msg(interaction_text).to_string(),
+                        overitem::TEXT_COLOR,
+                    )],
+                    &self.imgs,
+                    global_state,
+                )
+                .x_y(0.0, 100.0)
+                .position_ingame(over_pos)
+                .set(overitem_id, ui_widgets);
+            }
+
+            let speech_bubbles = &self.speech_bubbles;
+            let my_stats = stats.get(me);
+            // Render overhead name tags and health bars
+            for (
+                entity,
+                pos,
+                info,
+                bubble,
+                _,
+                _,
+                health,
+                _,
+                scale,
+                body,
+                hpfl,
+                in_group,
+                character_activity,
+            ) in (
+                &entities,
+                &pos,
+                interpolated.maybe(),
+                &stats,
+                &skill_sets,
+                healths.maybe(),
+                &buffs,
+                energy.maybe(),
+                scales.maybe(),
+                &bodies,
+                &mut hp_floater_lists,
+                &uids,
+                &inventories,
+                char_activities.maybe(),
+                poises.maybe(),
+                (is_mounts.maybe(), is_riders.maybe(), stances.maybe()),
+            )
+                .join()
+                .filter(|t| {
+                    let health = t.5;
+                    !health.is_some_and(|h| h.is_dead)
+                })
+                .filter_map(
+                    |(
+                        entity,
+                        pos,
+                        interpolated,
+                        stats,
+                        skill_set,
+                        health,
+                        buffs,
+                        energy,
+                        scale,
+                        body,
+                        hpfl,
+                        uid,
+                        inventory,
+                        character_activity,
+                        poise,
+                        (is_mount, is_rider, stance),
+                    )| {
+                        // Use interpolated position if available
+                        let pos = interpolated.map_or(pos.0, |i| i.pos);
+                        let in_group = client.group_members().contains_key(uid);
+                        let is_me = entity == me;
+                        let dist_sqr = pos.distance_squared(player_pos);
+
+                        let is_marked = my_stats.is_some_and(|s| s.marked_entities.contains(uid));
+
+                        // Determine whether to display nametag and healthbar based on whether the
+                        // entity is mounted, has been damaged, is targeted/selected, or is in your
+                        // group
+                        // Note: even if this passes the healthbar can
+                        // be hidden in some cases if it is at maximum
+                        let display_overhead_info = !is_me
+                            && (is_mount.is_none()
+                                || health.is_none_or(overhead::should_show_healthbar))
+                            && is_rider
+                                .is_none_or(|is_rider| Some(&is_rider.mount) != uids.get(me))
+                            && ((info.target_entity == Some(entity))
+                                || info.selected_entity.is_some_and(|s| s.0 == entity)
+                                || health.is_none_or(overhead::should_show_healthbar)
+                                || in_group
+                                || is_marked)
+                            && dist_sqr
+                                < (if in_group {
+                                    NAMETAG_GROUP_RANGE
+                                } else if hpfl
+                                    .time_since_last_dmg_by_me
+                                    .is_some_and(|t| t < NAMETAG_DMG_TIME)
+                                {
+                                    NAMETAG_DMG_RANGE
+                                } else {
+                                    NAMETAG_RANGE
+                                })
+                                .powi(2);
+
+                        let info = display_overhead_info.then(|| overhead::Info {
+                            name: Some(i18n.get_content(&stats.name)),
+                            health,
+                            buffs: Some(buffs),
+                            energy,
+                            combat_rating: if let (Some(health), Some(energy), Some(poise)) =
+                                (health, energy, poise)
+                            {
+                                Some(combat::combat_rating(
+                                    inventory, health, energy, poise, skill_set, *body, &msm,
+                                ))
+                            } else {
+                                None
+                            },
+                            hardcore: hardcore.contains(entity),
+                            stance,
+                            marked: is_marked,
+                        });
+                        // Only render bubble if nearby or if its me and setting is on
+                        let bubble = if (dist_sqr < SPEECH_BUBBLE_RANGE.powi(2) && !is_me)
+                            || (is_me && global_state.settings.interface.speech_bubble_self)
+                        {
+                            speech_bubbles.get(uid)
+                        } else {
+                            None
+                        };
+                        (info.is_some() || bubble.is_some()).then_some({
+                            (
+                                entity,
+                                pos,
+                                info,
+                                bubble,
+                                stats,
+                                skill_set,
+                                health,
+                                buffs,
+                                scale,
+                                body,
+                                hpfl,
+                                in_group,
+                                character_activity,
+                            )
+                        })
+                    },
+                )
+            {
+                let overhead_id = overhead_walker.next(
+                    &mut self.ids.overheads,
+                    &mut ui_widgets.widget_id_generator(),
+                );
+
+                let height_offset = body.height() * scale.map_or(1.0, |s| s.0) + 0.5;
+                let ingame_pos = pos + Vec3::unit_z() * height_offset;
+
+                let interaction_options =
+                    entity_interactables
+                        .get(&entity)
+                        .map_or_else(Vec::new, |interactions| {
+                            interactions
+                                .iter()
+                                .filter_map(|interaction| {
+                                    let message = match interaction {
+                                        EntityInteraction::HelpDowned => "hud-help",
+                                        EntityInteraction::Pet => "hud-pet",
+                                        EntityInteraction::Trade => "hud-trade",
+                                        EntityInteraction::Mount => "hud-mount",
+                                        EntityInteraction::Talk => "hud-talk",
+                                        EntityInteraction::StayFollow => {
+                                            let is_staying = character_activity
+                                                .is_some_and(|activity| activity.is_pet_staying);
+
+                                            if is_staying { "hud-follow" } else { "hud-stay" }
+                                        },
+                                        // Handled by overitem HUDs
+                                        EntityInteraction::PickupItem
+                                        | EntityInteraction::CampfireSit
+                                        | EntityInteraction::ActivatePortal => return None,
+                                    };
+
+                                    Some((
+                                        interaction.game_input(),
+                                        i18n.get_msg(message).to_string(),
+                                    ))
+                                })
+                                .collect()
+                        });
+
+                // Speech bubble, name, level, and hp bars
+                overhead::Overhead::new(
+                    info,
+                    bubble,
+                    in_group,
+                    self.pulse,
+                    interaction_options,
+                    i18n,
+                    &self.imgs,
+                    &self.fonts,
+                    &time,
+                    global_state,
+                )
+                .x_y(0.0, 100.0)
+                .position_ingame(ingame_pos)
+                .set(overhead_id, ui_widgets);
+
+                // Enemy SCT
+                if global_state.settings.interface.sct && !hpfl.floaters.is_empty() {
+                    fn calc_fade(floater: &HpFloater) -> f32 {
+                        if floater.info.precise {
+                            ((crate::ecs::sys::floater::PRECISE_SHOWTIME - floater.timer) * 0.75)
+                                + 0.5
+                        } else {
+                            ((crate::ecs::sys::floater::HP_SHOWTIME - floater.timer) * 0.25) + 0.2
+                        }
+                    }
+
+                    hpfl.floaters.retain(|fl| calc_fade(fl) > 0.0);
+                    let floaters = &hpfl.floaters;
+
+                    // Colors
+                    const WHITE: Rgb<f32> = Rgb::new(1.0, 0.9, 0.8);
+                    const LIGHT_OR: Rgb<f32> = Rgb::new(1.0, 0.925, 0.749);
+                    const LIGHT_MED_OR: Rgb<f32> = Rgb::new(1.0, 0.85, 0.498);
+                    const MED_OR: Rgb<f32> = Rgb::new(1.0, 0.776, 0.247);
+                    const DARK_ORANGE: Rgb<f32> = Rgb::new(1.0, 0.7, 0.0);
+                    const RED_ORANGE: Rgb<f32> = Rgb::new(1.0, 0.349, 0.0);
+                    const DAMAGE_COLORS: [Rgb<f32>; 6] = [
+                        WHITE,
+                        LIGHT_OR,
+                        LIGHT_MED_OR,
+                        MED_OR,
+                        DARK_ORANGE,
+                        RED_ORANGE,
+                    ];
+                    // Largest value that select the first color is 40, then it shifts colors
+                    // every 5
+                    let font_col = |font_size: u32, precise: bool| {
+                        if precise {
+                            Rgb::new(1.0, 0.9, 0.0)
+                        } else {
+                            DAMAGE_COLORS[(font_size.saturating_sub(36) / 5).min(5) as usize]
+                        }
+                    };
+
+                    for floater in floaters {
+                        let number_speed = 250.0; // Enemy number speed
+                        let sct_id = sct_walker
+                            .next(&mut self.ids.scts, &mut ui_widgets.widget_id_generator());
+                        let sct_bg_id = sct_bg_walker
+                            .next(&mut self.ids.sct_bgs, &mut ui_widgets.widget_id_generator());
+                        // Clamp the amount so you don't have absurdly large damage numbers
+                        let max_hp_frac = floater
+                            .info
+                            .amount
+                            .abs()
+                            .clamp(Health::HEALTH_EPSILON, health.map_or(1.0, |h| h.maximum()))
+                            / health.map_or(1.0, |h| h.maximum());
+                        let hp_dmg_text = if floater.info.amount.abs() < 0.1 {
+                            String::new()
+                        } else if global_state.settings.interface.sct_damage_rounding
+                            && floater.info.amount.abs() >= 1.0
+                        {
+                            format!("{:.0}", floater.info.amount.abs())
+                        } else {
+                            format!("{:.1}", floater.info.amount.abs())
+                        };
+                        let precise = floater.info.precise;
+                        // Timer sets text transparency
+                        let fade = calc_fade(floater);
+                        // Increase font size based on fraction of maximum health
+                        // "flashes" by having a larger size in the first 100ms
+                        let font_size =
+                            30 + (if precise {
+                                (max_hp_frac * 10.0) as u32 * 3 + 10
+                            } else {
+                                (max_hp_frac * 10.0) as u32 * 3
+                            }) + if floater.jump_timer < 0.1 {
+                                FLASH_MAX
+                                    * (((1.0 - floater.jump_timer * 10.0)
+                                        * 10.0
+                                        * if precise { 1.25 } else { 1.0 })
+                                        as u32)
+                            } else {
+                                0
+                            };
+                        let font_col = font_col(font_size, precise);
+                        // Timer sets the widget offset
+                        let y = if precise {
+                            ui_widgets.win_h * (floater.rand as f64 % 0.075)
+                                + ui_widgets.win_h * 0.05
+                        } else {
+                            (floater.timer as f64 / crate::ecs::sys::floater::HP_SHOWTIME as f64
+                                * number_speed)
+                                + 100.0
+                        };
+
+                        let x = if !precise {
+                            0.0
+                        } else {
+                            (floater.rand as f64 - 0.5) * 0.075 * ui_widgets.win_w
+                                + (0.03 * ui_widgets.win_w * (floater.rand as f64 - 0.5).signum())
+                        };
+
+                        Text::new(&hp_dmg_text)
+                            .font_size(font_size)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(if floater.info.amount < 0.0 {
+                                Color::Rgba(0.0, 0.0, 0.0, fade)
+                            } else {
+                                Color::Rgba(0.0, 0.0, 0.0, 1.0)
+                            })
+                            .x_y(x, y - 3.0)
+                            .position_ingame(ingame_pos)
+                            .set(sct_bg_id, ui_widgets);
+                        Text::new(&hp_dmg_text)
+                            .font_size(font_size)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .x_y(x, y)
+                            .color(if floater.info.amount < 0.0 {
+                                Color::Rgba(font_col.r, font_col.g, font_col.b, fade)
+                            } else {
+                                Color::Rgba(0.1, 1.0, 0.1, 1.0)
+                            })
+                            .position_ingame(ingame_pos)
+                            .set(sct_id, ui_widgets);
+                    }
+                }
+            }
+
+            for (pos, bubble) in &self.content_bubbles {
+                let overhead_id = overhead_walker.next(
+                    &mut self.ids.overheads,
+                    &mut ui_widgets.widget_id_generator(),
+                );
+
+                overhead::Overhead::new(
+                    None,
+                    Some(bubble),
+                    false,
+                    self.pulse,
+                    Vec::new(),
+                    i18n,
+                    &self.imgs,
+                    &self.fonts,
+                    &time,
+                    global_state,
+                )
+                .x_y(0.0, 100.0)
+                .position_ingame(*pos)
+                .set(overhead_id, ui_widgets);
+            }
+        }
+
+        // Display debug window.
+        // TODO:
+        // Make it use i18n keys.
+        if let Some(debug_info) = debug_info {
+            prof_span!("debug info");
+
+            const V_PAD: f64 = 5.0;
+            const H_PAD: f64 = 5.0;
+            const FONT_SCALE: u32 = 14;
+            let mut largest_str_len: usize = 0;
+            let mut debug_msg_line_count: usize = 0;
+
+            // Ticks per second
+            let debug_msg_ticks_per_sec = format!(
+                "FPS: {:.0} ({}ms) (~{}ms)",
+                debug_info.tps,
+                debug_info.frame_time.as_millis(),
+                debug_info.frame_variance.as_millis(),
+            );
+            Text::new(&debug_msg_ticks_per_sec)
+                .color(TEXT_COLOR)
+                .top_left_with_margins_on(self.ids.debug_bg, V_PAD, H_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.fps_counter, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_ticks_per_sec.len());
+            debug_msg_line_count += 1;
+
+            // Ping
+            let debug_msg_ping = format!("Ping: {:.0}ms", debug_info.ping_ms);
+            Text::new(&debug_msg_ping)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.fps_counter, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.ping, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_ping.len());
+            debug_msg_line_count += 1;
+
+            // Player's position
+            let coordinates_text = match debug_info.coordinates {
+                Some(coordinates) => format!(
+                    "Coordinates: ({:.0}, {:.0}, {:.0})",
+                    coordinates.0.x, coordinates.0.y, coordinates.0.z,
+                ),
+                None => "Player has no Pos component".to_owned(),
+            };
+            Text::new(&coordinates_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.ping, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.coordinates, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, coordinates_text.len());
+            debug_msg_line_count += 1;
+
+            // Player's velocity
+            let (velocity_text, glide_ratio_text) = match debug_info.velocity {
+                Some(velocity) => {
+                    let velocity = velocity.0;
+                    let velocity_text = format!(
+                        "Velocity: ({:.1}, {:.1}, {:.1}) [{:.1} u/s]",
+                        velocity.x,
+                        velocity.y,
+                        velocity.z,
+                        velocity.magnitude()
+                    );
+                    let horizontal_velocity = velocity.xy().magnitude();
+                    let dz = velocity.z;
+                    // don't divide by zero
+                    let glide_ratio_text = if dz.abs() > 0.0001 {
+                        format!("Glide Ratio: {:.1}", -(horizontal_velocity / dz))
+                    } else {
+                        "Glide Ratio: Altitude is constant".to_owned()
+                    };
+
+                    (velocity_text, glide_ratio_text)
+                },
+                None => {
+                    let err = "Player has no Vel component";
+                    (err.to_owned(), err.to_owned())
+                },
+            };
+            Text::new(&velocity_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.coordinates, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.velocity, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, velocity_text.len());
+            debug_msg_line_count += 1;
+
+            Text::new(&glide_ratio_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.velocity, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.glide_ratio, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, glide_ratio_text.len());
+            debug_msg_line_count += 1;
+
+            // Glide Angle of Attack
+            let glide_angle_text = angle_of_attack_text(
+                debug_info.in_fluid,
+                debug_info.velocity,
+                debug_info.character_state.as_ref(),
+            );
+            Text::new(&glide_angle_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.glide_ratio, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.glide_aoe, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, glide_angle_text.len());
+            debug_msg_line_count += 1;
+
+            // Air velocity
+            let air_vel_text = air_velocity(debug_info.in_fluid);
+            Text::new(&air_vel_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.glide_aoe, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.air_vel, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, air_vel_text.len());
+            debug_msg_line_count += 1;
+
+            // Player's orientation vector
+            let orientation_text = match debug_info.ori {
+                Some(ori) => {
+                    let orientation = ori.look_dir();
+                    format!(
+                        "Orientation: ({:.2}, {:.2}, {:.2})",
+                        orientation.x, orientation.y, orientation.z,
+                    )
+                },
+                None => "Player has no Ori component".to_owned(),
+            };
+            Text::new(&orientation_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.air_vel, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.orientation, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, orientation_text.len());
+            debug_msg_line_count += 1;
+
+            let look_dir_text = {
+                let look_vec = debug_info.look_dir.to_vec();
+
+                format!(
+                    "Look Direction: ({:.2}, {:.2}, {:.2})",
+                    look_vec.x, look_vec.y, look_vec.z,
+                )
+            };
+            Text::new(&look_dir_text)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.orientation, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.look_direction, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, look_dir_text.len());
+            debug_msg_line_count += 1;
+
+            // Loaded distance
+            let debug_msg_loaded_distance = format!(
+                "View distance: {:.2} blocks ({:.2} chunks)",
+                client.loaded_distance(),
+                client.loaded_distance() / TerrainChunk::RECT_SIZE.x as f32,
+            );
+            Text::new(&debug_msg_loaded_distance)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.look_direction, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.loaded_distance, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_loaded_distance.len());
+            debug_msg_line_count += 1;
+
+            // Time
+            let time_in_seconds = client.state().get_time_of_day();
+            let current_time = NaiveTime::from_num_seconds_from_midnight_opt(
+                // Wraps around back to 0s if it exceeds 24 hours (24 hours = 86400s)
+                (time_in_seconds as u64 % 86400) as u32,
+                0,
+            )
+            .expect("time always valid");
+            let debug_msg_time = format!("Time: {}", current_time.format("%H:%M"));
+            Text::new(&debug_msg_time)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.loaded_distance, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.time, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_time.len());
+            debug_msg_line_count += 1;
+
+            // Weather
+            let weather = client.weather_at_player();
+            let debug_msg_weather = format!(
+                "Weather({kind}): {{cloud: {cloud:.2}, rain: {rain:.2}, wind: <{wind_x:.0}, \
+                 {wind_y:.0}>}}",
+                kind = weather.get_kind(),
+                cloud = weather.cloud,
+                rain = weather.rain,
+                wind_x = weather.wind.x,
+                wind_y = weather.wind.y
+            );
+            Text::new(&debug_msg_weather)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.time, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.weather, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_weather.len());
+            debug_msg_line_count += 1;
+
+            // Number of entities
+            let entity_count = client.state().ecs().entities().join().count();
+            let debug_msg_entity_count = format!("Entity count: {}", entity_count);
+            Text::new(&debug_msg_entity_count)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.weather, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.entity_count, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_entity_count.len());
+            debug_msg_line_count += 1;
+
+            // Number of chunks
+            let debug_msg_num_chunks = format!(
+                "Chunks: {} ({} visible) & {} (shadow)",
+                debug_info.num_chunks, debug_info.num_visible_chunks, debug_info.num_shadow_chunks,
+            );
+            Text::new(&debug_msg_num_chunks)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.entity_count, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.num_chunks, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_num_chunks.len());
+            debug_msg_line_count += 1;
+
+            // Type of biome
+            let debug_msg_biome_type = format!("Biome: {:?}", client.current_biome());
+            Text::new(&debug_msg_biome_type)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.num_chunks, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.current_biome, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_biome_type.len());
+            debug_msg_line_count += 1;
+
+            // Type of site
+            let debug_msg_site_type = format!("Site: {:?}", client.current_site());
+            Text::new(&debug_msg_site_type)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.current_biome, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.current_site, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_site_type.len());
+            debug_msg_line_count += 1;
+
+            // Current song info
+            let debug_msg_current_song = format!(
+                "Now playing: {} [{}]",
+                debug_info.current_track, debug_info.current_artist,
+            );
+            Text::new(&debug_msg_current_song)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.current_site, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.song_info, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_current_song.len());
+            debug_msg_line_count += 1;
+
+            let debug_msg_active_channels = format!(
+                "Active channels: M{}, A{}, S{}, U{}, CPU: {:2.0}%",
+                debug_info.active_channels.music,
+                debug_info.active_channels.ambience,
+                debug_info.active_channels.sfx,
+                debug_info.active_channels.ui,
+                debug_info.audio_cpu_usage * 100.0,
+            );
+            Text::new(&debug_msg_active_channels)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.song_info, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.active_channels, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_active_channels.len());
+            debug_msg_line_count += 1;
+
+            // Number of lights
+            let debug_msg_num_lights = format!("Lights: {}", debug_info.num_lights,);
+            Text::new(&debug_msg_num_lights)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.active_channels, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.num_lights, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_num_lights.len());
+            debug_msg_line_count += 1;
+
+            // Number of figures
+            let debug_msg_num_figures = format!(
+                "Figures: {} ({} visible)",
+                debug_info.num_figures, debug_info.num_figures_visible,
+            );
+            Text::new(&debug_msg_num_figures)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.num_lights, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.num_figures, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_num_figures.len());
+            debug_msg_line_count += 1;
+
+            // Number of particles
+            let debug_msg_num_particles = format!(
+                "Particles: {} ({} visible)",
+                debug_info.num_particles, debug_info.num_particles_visible,
+            );
+            Text::new(&debug_msg_num_particles)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.num_figures, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.num_particles, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_num_particles.len());
+            debug_msg_line_count += 1;
+
+            // Graphics backend
+            let debug_msg_graphics_backend = format!(
+                "Graphics backend: {}",
+                global_state.window.renderer().graphics_backend(),
+            );
+            Text::new(&debug_msg_graphics_backend)
+                .color(TEXT_COLOR)
+                .down_from(self.ids.num_particles, V_PAD)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(FONT_SCALE))
+                .set(self.ids.graphics_backend, ui_widgets);
+            largest_str_len = usize::max(largest_str_len, debug_msg_graphics_backend.len());
+            debug_msg_line_count += 1;
+
+            let gpu_timings = global_state.window.renderer().timings();
+
+            // GPU timing for different pipelines
+            if !gpu_timings.is_empty() {
+                let num_timings = gpu_timings.len();
+                // Make sure we have enough ids
+                if self.ids.gpu_timings.len() < num_timings {
+                    self.ids
+                        .gpu_timings
+                        .resize(num_timings, &mut ui_widgets.widget_id_generator());
+                }
+
+                for (i, timing) in gpu_timings.iter().enumerate() {
+                    let label = timing.1;
+                    // We skip displaying these since they aren't present every frame.
+                    if label.starts_with(crate::render::UI_PREMULTIPLY_PASS) {
+                        continue;
+                    }
+                    let timings_text = &format!("{label:16}{:.3} ms", timing.2 * 1000.0);
+                    let timings_widget = Text::new(timings_text)
+                        .color(TEXT_COLOR)
+                        .down(V_PAD)
+                        .x_place_on(
+                            self.ids.debug_bg,
+                            conrod_core::position::Place::Start(Some(
+                                H_PAD + 10.0 * timing.0 as f64,
+                            )),
+                        )
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(FONT_SCALE));
+
+                    largest_str_len = usize::max(largest_str_len, timings_text.len());
+                    debug_msg_line_count += 1;
+
+                    timings_widget.set(self.ids.gpu_timings[i], ui_widgets);
+                }
+            }
+
+            // TODO: Use a more accurate method for calculating background width from text
+            // content/length. Multiplying by font scale then dividing by 2.0 is
+            // only an ad-hoc approach.
+            let debug_bg_width =
+                (H_PAD * 2.0) + (largest_str_len as f64) * (FONT_SCALE as f64) / 2.0;
+            let debug_bg_height =
+                (V_PAD * 2.0) + (debug_msg_line_count as f64) * ((FONT_SCALE as f64) + V_PAD);
+            let debug_bg_size = [debug_bg_width, debug_bg_height];
+
+            Rectangle::fill(debug_bg_size)
+                .rgba(0.0, 0.0, 0.0, global_state.settings.chat.chat_opacity)
+                .top_left_with_margins_on(ui_widgets.window, 10.0, 10.0)
+                .set(self.ids.debug_bg, ui_widgets);
+        }
+
+        // Bag button and nearby icons
+        let ecs = client.state().ecs();
+        // let entity = info.viewpoint_entity;
+        let stats = ecs.read_storage::<comp::Stats>();
+        let skill_sets = ecs.read_storage::<comp::SkillSet>();
+        let buffs = ecs.read_storage::<comp::Buffs>();
+        let msm = ecs.read_resource::<MaterialStatManifest>();
+        let time = ecs.read_resource::<Time>();
+
+        // Action text in bottom right corner
+        DynamicTutorial::new(global_state, client, &self.fonts, &self.imgs, i18n)
+            .set(self.ids.buttons, ui_widgets);
+
+        // Group Window
+        for event in Group::new(
+            &mut self.show,
+            client,
+            &global_state.settings,
+            &self.imgs,
+            &self.rot_imgs,
+            &self.fonts,
+            i18n,
+            self.pulse,
+            global_state,
+            tooltip_manager,
+            &msm,
+            &time,
+        )
+        .set(self.ids.group_window, ui_widgets)
+        {
+            match event {
+                group::Event::Accept => events.push(Event::AcceptInvite),
+                group::Event::Decline => events.push(Event::DeclineInvite),
+                group::Event::Kick(uid) => events.push(Event::KickMember(uid)),
+                group::Event::LeaveGroup => events.push(Event::LeaveGroup),
+                group::Event::AssignLeader(uid) => events.push(Event::AssignLeader(uid)),
+            }
+        }
+        // Popup (waypoint saved and similar notifications)
+        Popup::new(
+            i18n,
+            client,
+            &self.new_notifications,
+            &self.fonts,
+            &self.show,
+            global_state,
+        )
+        .set(self.ids.popup, ui_widgets);
+
+        if let Some(prompt_dialog_settings) = &self.show.prompt_dialog {
+            // Prompt Dialog
+            match PromptDialog::new(
+                &self.imgs,
+                &self.fonts,
+                &global_state.i18n,
+                &global_state.settings,
+                prompt_dialog_settings,
+            )
+            .set(self.ids.prompt_dialog, ui_widgets)
+            {
+                Some(dialog_outcome_event) => {
+                    match dialog_outcome_event {
+                        DialogOutcomeEvent::Affirmative(event) => events.push(event),
+                        DialogOutcomeEvent::Negative(event) => {
+                            if let Some(event) = event {
+                                events.push(event);
+                            };
+                        },
+                    };
+
+                    // Close the prompt dialog once an option has been chosen
+                    self.show.prompt_dialog = None;
+                },
+                None => {},
+            }
+        }
+
+        // Skillbar
+        // Get player stats
+        let ecs = client.state().ecs();
+        let entity = info.viewpoint_entity;
+        let healths = ecs.read_storage::<Health>();
+        let inventories = ecs.read_storage::<comp::Inventory>();
+        let rbm = ecs.read_resource::<RecipeBookManifest>();
+        let energies = ecs.read_storage::<comp::Energy>();
+        let skillsets = ecs.read_storage::<comp::SkillSet>();
+        let active_abilities = ecs.read_storage::<comp::ActiveAbilities>();
+        let bodies = ecs.read_storage::<comp::Body>();
+        let poises = ecs.read_storage::<comp::Poise>();
+        let uids = ecs.read_storage::<Uid>();
+        let combos = ecs.read_storage::<comp::Combo>();
+        let combo = combos.get(entity);
+        let time = ecs.read_resource::<Time>();
+        let stances = ecs.read_storage::<comp::Stance>();
+        let char_states = ecs.read_storage::<comp::CharacterState>();
+        // Combo floater stuffs
+        self.floaters.combo_floater = self.floaters.combo_floater.map(|mut f| {
+            f.timer -= dt.as_secs_f64();
+            f
+        });
+        self.floaters.combo_floater = self.floaters.combo_floater.filter(|f| f.timer > 0_f64);
+
+        if let (
+            Some(health),
+            Some(inventory),
+            Some(energy),
+            Some(poise),
+            Some(skillset),
+            Some(body),
+        ) = (
+            healths.get(entity),
+            inventories.get(entity),
+            energies.get(entity),
+            poises.get(entity),
+            skillsets.get(entity),
+            bodies.get(entity),
+        ) {
+            let skillbar_events = Skillbar::new(
+                client,
+                &info,
+                global_state,
+                &self.imgs,
+                &self.item_imgs,
+                &self.fonts,
+                &self.rot_imgs,
+                health,
+                inventory,
+                energy,
+                poise,
+                skillset,
+                active_abilities.get(entity),
+                body,
+                //&character_state,
+                self.pulse,
+                //&controller,
+                &self.hotbar,
+                tooltip_manager,
+                item_tooltip_manager,
+                &mut self.slot_manager,
+                i18n,
+                &self.item_i18n,
+                &msm,
+                &rbm,
+                self.floaters.combo_floater,
+                combo,
+                char_states.get(entity),
+                stances.get(entity),
+                stats.get(entity),
+                buffs.get(entity),
+            )
+            .set(self.ids.skillbar, ui_widgets);
+
+            for event in skillbar_events {
+                match event {
+                    skillbar::Event::OpenDiary(skillgroup) => {
+                        self.show.diary(true);
+                        self.show.open_skill_tree(skillgroup);
+                    },
+                    skillbar::Event::OpenBag => self.show.bag(!self.show.bag),
+                }
+            }
+        }
+
+        // Buffs
+        if let (Some(player_buffs), Some(health), Some(energy), Some(poise)) = (
+            buffs.get(info.viewpoint_entity),
+            healths.get(entity),
+            energies.get(entity),
+            poises.get(entity),
+        ) {
+            for event in BuffsBar::new(
+                &self.imgs,
+                &self.fonts,
+                &self.rot_imgs,
+                tooltip_manager,
+                i18n,
+                player_buffs,
+                stances.get(entity),
+                self.pulse,
+                global_state,
+                health,
+                energy,
+                poise,
+                &time,
+            )
+            .set(self.ids.buffs, ui_widgets)
+            {
+                match event {
+                    buffs::Event::RemoveBuff(buff_id) => events.push(Event::RemoveBuff(buff_id)),
+                    buffs::Event::LeaveStance => events.push(Event::LeaveStance),
+                }
+            }
+        }
+        // Crafting
+        if self.show.crafting
+            && let Some(inventory) = inventories.get(entity)
+        {
+            for event in Crafting::new(
+                //&self.show,
+                client,
+                global_state,
+                &info,
+                &self.imgs,
+                &self.fonts,
+                i18n,
+                &self.item_i18n,
+                self.pulse,
+                &self.rot_imgs,
+                item_tooltip_manager,
+                &mut self.slot_manager,
+                &self.item_imgs,
+                inventory,
+                &rbm,
+                &msm,
+                tooltip_manager,
+                &mut self.show,
+                &global_state.settings,
+            )
+            .set(self.ids.crafting_window, ui_widgets)
+            {
+                match event {
+                    crafting::Event::CraftRecipe {
+                        recipe_name,
+                        amount,
+                    } => {
+                        events.push(Event::CraftRecipe {
+                            recipe_name,
+                            craft_sprite: self.show.crafting_fields.craft_sprite,
+                            amount,
+                        });
+                    },
+                    crafting::Event::CraftModularWeapon {
+                        primary_slot,
+                        secondary_slot,
+                    } => {
+                        events.push(Event::CraftModularWeapon {
+                            primary_slot,
+                            secondary_slot,
+                            craft_sprite: self
+                                .show
+                                .crafting_fields
+                                .craft_sprite
+                                .map(|(pos, _sprite)| pos),
+                        });
+                    },
+                    crafting::Event::CraftModularWeaponComponent {
+                        toolkind,
+                        material,
+                        modifier,
+                    } => {
+                        events.push(Event::CraftModularWeaponComponent {
+                            toolkind,
+                            material,
+                            modifier,
+                            craft_sprite: self
+                                .show
+                                .crafting_fields
+                                .craft_sprite
+                                .map(|(pos, _sprite)| pos),
+                        });
+                    },
+                    crafting::Event::Close => {
+                        self.show.stats = false;
+                        self.show.crafting(false);
+                        if !self.show.social {
+                            self.show.want_grab = true;
+                            self.force_ungrab = false;
+                        } else {
+                            self.force_ungrab = true
+                        };
+                    },
+                    crafting::Event::ChangeCraftingTab(sel_cat) => {
+                        self.show.open_crafting_tab(sel_cat, None);
+                    },
+                    crafting::Event::Focus(widget_id) => {
+                        self.to_focus = Some(Some(widget_id));
+                    },
+                    crafting::Event::SearchRecipe(search_key) => {
+                        self.show.search_crafting_recipe(search_key);
+                    },
+                    crafting::Event::ClearRecipeInputs => {
+                        self.show.crafting_fields.recipe_inputs.clear();
+                    },
+                    crafting::Event::RepairItem { slot } => {
+                        if let Some(sprite_pos) = self
+                            .show
+                            .crafting_fields
+                            .craft_sprite
+                            .map(|(pos, _sprite)| pos)
+                        {
+                            events.push(Event::RepairItem {
+                                item: slot,
+                                sprite_pos,
+                            });
+                        }
+                    },
+                    crafting::Event::ShowAllRecipes(show) => {
+                        events.push(Event::SettingsChange(SettingsChange::Gameplay(
+                            crate::session::settings_change::Gameplay::ChangeShowAllRecipes(show),
+                        )));
+                    },
+                    crafting::Event::MoveCrafting(pos) => {
+                        global_state.settings.hud_position.crafting = pos;
+                    },
+                }
+            }
+        }
+
+        if global_state.settings.audio.subtitles {
+            Subtitles::new(
+                client,
+                &global_state.settings,
+                global_state.audio.get_listener_pos(),
+                global_state.audio.get_listener_ori(),
+                &mut global_state.audio.subtitles,
+                &self.fonts,
+                i18n,
+            )
+            .set(self.ids.subtitles, ui_widgets);
+        }
+        let inventory = inventories.get(entity);
+        //Loot
+        LootScroller::new(
+            &mut self.new_loot_messages,
+            client,
+            &info,
+            &self.show,
+            &self.imgs,
+            &self.item_imgs,
+            &self.rot_imgs,
+            &self.fonts,
+            i18n,
+            &self.item_i18n,
+            &msm,
+            &rbm,
+            inventory,
+            item_tooltip_manager,
+            self.pulse,
+        )
+        .set(self.ids.loot_scroller, ui_widgets);
+
+        self.new_loot_messages.clear();
+
+        let persisted_state = self.persisted_state.borrow();
+        // MiniMap
+        for event in MiniMap::new(
+            client,
+            &self.imgs,
+            &self.rot_imgs,
+            &self.world_map,
+            &self.fonts,
+            self.pulse,
+            camera.get_orientation(),
+            global_state,
+            &persisted_state.location_markers,
+            &self.voxel_minimap,
+            &self.extra_markers,
+        )
+        .set(self.ids.minimap, ui_widgets)
+        {
+            match event {
+                minimap::Event::SettingsChange(interface_change) => {
+                    events.push(Event::SettingsChange(interface_change.into()));
+                },
+                minimap::Event::MoveMiniMap(pos) => {
+                    global_state.settings.hud_position.minimap = pos;
+                },
+            }
+        }
+        drop(persisted_state);
+
+        // Bag contents
+        if self.show.bag
+            && let (
+                Some(player_stats),
+                Some(skill_set),
+                Some(health),
+                Some(energy),
+                Some(body),
+                Some(poise),
+            ) = (
+                stats.get(info.viewpoint_entity),
+                skill_sets.get(info.viewpoint_entity),
+                healths.get(entity),
+                energies.get(entity),
+                bodies.get(entity),
+                poises.get(entity),
+            )
+        {
+            for event in BagManager::new(
+                global_state,
+                client,
+                &info,
+                &self.imgs,
+                &self.item_imgs,
+                &self.fonts,
+                &self.rot_imgs,
+                tooltip_manager,
+                item_tooltip_manager,
+                &mut self.slot_manager,
+                self.pulse,
+                i18n,
+                &self.item_i18n,
+                player_stats,
+                skill_set,
+                health,
+                energy,
+                &self.show,
+                body,
+                &msm,
+                &rbm,
+                poise,
+                &self.menu_events,
+            )
+            .set(self.ids.bag, ui_widgets)
+            {
+                match event {
+                    bag::BagEvent::Close => {
+                        self.show.stats = false;
+                        Self::show_bag(&mut self.slot_manager, &mut self.show, false);
+                        if !self.show.social {
+                            self.show.want_grab = true;
+                            self.force_ungrab = false;
+                        } else {
+                            self.force_ungrab = true
+                        };
+                        // Also closes any open trade windows
+                        if self.show.trade {
+                            self.events.push(Event::TradeAction(TradeAction::Decline));
+                        }
+                    },
+                    bag::BagEvent::MoveBag(pos) => {
+                        global_state.settings.hud_position.bag.own = pos;
+                    },
+                    bag::BagEvent::BagExpand => {
+                        self.show.bag_menu_split = !self.show.bag_menu_split
+                    },
+                    bag::BagEvent::SetDetailsMode(mode) => self.show.bag_details = mode,
+                    bag::BagEvent::ChangeInventorySortOrder(sort_order) => {
+                        self.events
+                            .push(Event::SettingsChange(SettingsChange::Inventory(
+                                Inventory::ChangeSortOrder(sort_order),
+                            )));
+                    },
+                    bag::BagEvent::SortInventory(sort_order) => {
+                        self.events.push(Event::SortInventory(sort_order))
+                    },
+                    bag::BagEvent::SwapEquippedWeapons => {
+                        self.events.push(Event::SwapEquippedWeapons)
+                    },
+                }
+            }
+        }
+
+        // Trade window
+        if self.show.trade {
+            for event in Trade::new(
+                client,
+                global_state,
+                &info,
+                &self.imgs,
+                &self.item_imgs,
+                &self.fonts,
+                &self.rot_imgs,
+                tooltip_manager,
+                item_tooltip_manager,
+                &mut self.slot_manager,
+                i18n,
+                &self.item_i18n,
+                &msm,
+                &rbm,
+                self.pulse,
+                &mut self.show,
+            )
+            .set(self.ids.trade, ui_widgets)
+            {
+                match event {
+                    trade::TradeEvent::HudUpdate(update) => match update {
+                        trade::HudUpdate::Focus(idx) => self.to_focus = Some(Some(idx)),
+                        trade::HudUpdate::Submit => {
+                            let key = self.show.trade_amount_input_key.take();
+                            key.map(|k| {
+                                k.submit_action.map(|action| {
+                                    self.events.push(Event::TradeAction(action));
+                                });
+                            });
+                        },
+                    },
+                    trade::TradeEvent::TradeAction(action) => {
+                        if let TradeAction::Decline = action {
+                            self.show.stats = false;
+                            self.show.trade(false);
+                            if !self.show.social {
+                                self.show.want_grab = true;
+                                self.force_ungrab = false;
+                            } else {
+                                self.force_ungrab = true
+                            };
+                            self.show.prompt_dialog = None;
+                        }
+                        events.push(Event::TradeAction(action));
+                    },
+                    trade::TradeEvent::SetDetailsMode(mode) => {
+                        self.show.trade_details = mode;
+                    },
+                    trade::TradeEvent::ShowPrompt(prompt) => {
+                        self.show.prompt_dialog = Some(prompt);
+                    },
+                    trade::TradeEvent::MoveBag(pos) => {
+                        global_state.settings.hud_position.bag.other = pos;
+                    },
+                }
+            }
+        }
+
+        self.new_messages.retain(chat::show_in_chatbox);
+
+        // Chat box
+        // Draw this after loot scroller and subtitles so it can be dragged
+        // even when hovering over them
+        // TODO look into parenting and then settings movable widgets to floating
+        if global_state.settings.interface.toggle_chat || self.force_chat {
+            // `rev` since we push to the front of the queue and want the oldest message to
+            // be the last pushed to the front.
+            for hidden in self
+                .persisted_state
+                .borrow_mut()
+                .message_backlog
+                .0
+                .drain(..)
+                .rev()
+            {
+                self.new_messages.push_front(hidden);
+            }
+            for event in Chat::new(
+                &mut self.new_messages,
+                client,
+                global_state,
+                self.pulse,
+                &self.imgs,
+                &self.fonts,
+                i18n,
+                scale,
+                self.clear_chat,
+            )
+            .and_then(self.force_chat_input.take(), |c, input| c.input(input))
+            .and_then(self.tab_complete.take(), |c, input| {
+                c.prepare_tab_completion(input)
+            })
+            .and_then(self.force_chat_cursor.take(), |c, pos| c.cursor_pos(pos))
+            .set(self.ids.chat, ui_widgets)
+            {
+                match event {
+                    chat::Event::TabCompletionStart(input) => {
+                        self.tab_complete = Some(input);
+                    },
+                    chat::Event::SendMessage(message) => {
+                        events.push(Event::SendMessage(message));
+                    },
+                    chat::Event::SendCommand(name, args) => {
+                        events.push(Event::SendCommand(name, args));
+                    },
+                    chat::Event::Focus(focus_id) => {
+                        self.to_focus = Some(Some(focus_id));
+                    },
+                    chat::Event::ChangeChatTab(tab) => {
+                        events.push(Event::SettingsChange(ChatChange::ChangeChatTab(tab).into()));
+                    },
+                    chat::Event::ShowChatTabSettings(tab) => {
+                        self.show.chat_tab_settings_index = Some(tab);
+                        self.show.settings_tab = SettingsTab::Chat;
+                        self.show.settings(true);
+                    },
+                    chat::Event::ResizeChat(size) => {
+                        global_state.settings.chat.chat_size_x = size.x;
+                        global_state.settings.chat.chat_size_y = size.y;
+                    },
+                    chat::Event::MoveChat(pos) => {
+                        global_state.settings.chat.chat_pos_x = pos.x;
+                        global_state.settings.chat.chat_pos_y = pos.y;
+                    },
+                    chat::Event::DisableForceChat => {
+                        self.force_chat = false;
+                    },
+                }
+            }
+
+            // Set to false only after the chat widget is cleared and updated
+            self.clear_chat = false;
+        } else {
+            let mut persisted_state = self.persisted_state.borrow_mut();
+            for message in self.new_messages.drain(..) {
+                persisted_state
+                    .message_backlog
+                    .new_message(client, &global_state.profile, message);
+            }
+        }
+
+        self.new_messages.clear();
+        self.new_notifications.clear();
+
+        // Settings
+        if let Windows::Settings = self.show.open_windows {
+            for event in SettingsWindow::new(
+                global_state,
+                &self.show,
+                &self.imgs,
+                &self.fonts,
+                i18n,
+                client.server_view_distance_limit(),
+                fps as f32,
+            )
+            .set(self.ids.settings_window, ui_widgets)
+            {
+                match event {
+                    settings_window::Event::ChangeTab(tab) => self.show.open_setting_tab(tab),
+                    settings_window::Event::Close => {
+                        // Unpause the game if we are on singleplayer so that we can logout
+                        #[cfg(feature = "singleplayer")]
+                        global_state.unpause();
+                        self.show.want_grab = true;
+                        self.force_ungrab = false;
+
+                        self.show.settings(false)
+                    },
+                    settings_window::Event::ChangeChatSettingsTab(tab) => {
+                        self.show.chat_tab_settings_index = tab;
+                    },
+                    settings_window::Event::SettingsChange(settings_change) => {
+                        events.push(Event::SettingsChange(settings_change));
+                    },
+                    settings_window::Event::ResetBindingMode => {
+                        // Disables gamepad mapping mode to avoid issues
+                        global_state.window.reset_mapping_mode();
+                    },
+                }
+            }
+        }
+        // Quest Window
+        let stats = client.state().ecs().read_storage::<comp::Stats>();
+        let interpolated = client.state().ecs().read_storage::<vcomp::Interpolated>();
+        if let Some((sender, _, dialogue)) = &self.current_dialogue
+            && let Some(i) = interpolated.get(*sender)
+            && let Some(player_i) = interpolated.get(client.entity())
+            && i.pos.distance_squared(player_i.pos) > MAX_NPCINTERACT_RANGE.powi(2)
+        {
+            self.show.quest(false);
+            events.push(Event::Dialogue(*sender, rtsim::Dialogue {
+                id: dialogue.id,
+                kind: rtsim::DialogueKind::End,
+            }));
+        }
+
+        let dialogue_open = if self.show.quest
+            && let Some((sender, time, dialogue)) = &self.current_dialogue
+        {
+            match Quest::new(
+                &self.show,
+                client,
+                &self.imgs,
+                &self.fonts,
+                i18n,
+                global_state,
+                &self.rot_imgs,
+                tooltip_manager,
+                &self.item_imgs,
+                *sender,
+                dialogue,
+                *time,
+                self.pulse,
+            )
+            .set(self.ids.quest_window, ui_widgets)
+            {
+                Some(quest::Event::Dialogue(target, dialogue)) => {
+                    events.push(Event::Dialogue(target, dialogue));
+                    true
+                },
+                Some(quest::Event::Close) => {
+                    self.show.quest(false);
+                    if !self.show.bag {
+                        self.show.want_grab = true;
+                        self.force_ungrab = false;
+                    } else {
+                        self.force_ungrab = true
+                    };
+                    false
+                },
+                None => true,
+            }
+        } else {
+            false
+        };
+
+        Tutorial::new(
+            &self.show,
+            client,
+            &self.imgs,
+            &self.fonts,
+            i18n,
+            global_state,
+            &self.rot_imgs,
+            tooltip_manager,
+            &self.item_imgs,
+            self.pulse,
+            dt,
+            self.show.esc_menu,
+        )
+        .set(self.ids.tutorial_window, ui_widgets);
+
+        if !dialogue_open && let Some((sender, _, dialogue)) = self.current_dialogue.take() {
+            events.push(Event::Dialogue(sender, rtsim::Dialogue {
+                id: dialogue.id,
+                kind: rtsim::DialogueKind::End,
+            }));
+        }
+
+        // Social Window
+        if self.show.social {
+            let ecs = client.state().ecs();
+            let _stats = ecs.read_storage::<comp::Stats>();
+            for event in Social::new(
+                &self.show,
+                client,
+                &self.imgs,
+                &self.fonts,
+                i18n,
+                info.selected_entity,
+                &self.rot_imgs,
+                tooltip_manager,
+                global_state,
+            )
+            .set(self.ids.social_window, ui_widgets)
+            {
+                match event {
+                    social::Event::Close => {
+                        self.show.social(false);
+                        if !self.show.bag {
+                            self.show.want_grab = true;
+                            self.force_ungrab = false;
+                        } else {
+                            self.force_ungrab = true
+                        };
+                    },
+                    social::Event::Focus(widget_id) => {
+                        self.to_focus = Some(Some(widget_id));
+                    },
+                    social::Event::Invite(uid) => events.push(Event::InviteMember(uid)),
+                    social::Event::SearchPlayers(search_key) => {
+                        self.show.search_social_players(search_key)
+                    },
+                    social::Event::SetBattleMode(mode) => {
+                        events.push(Event::SetBattleMode(mode));
+                    },
+                    social::Event::MoveSocial(pos) => {
+                        global_state.settings.hud_position.social = pos;
+                    },
+                }
+            }
+        }
+
+        // Diary
+        if self.show.diary {
+            let entity = info.viewpoint_entity;
+            let skill_sets = ecs.read_storage::<comp::SkillSet>();
+            if let (
+                Some(skill_set),
+                Some(inventory),
+                Some(char_state),
+                Some(health),
+                Some(energy),
+                Some(body),
+                Some(poise),
+                Some(uid),
+            ) = (
+                skill_sets.get(entity),
+                inventories.get(entity),
+                char_states.get(entity),
+                healths.get(entity),
+                energies.get(entity),
+                bodies.get(entity),
+                poises.get(entity),
+                uids.get(entity),
+            ) {
+                for event in Diary::new(
+                    &self.show,
+                    client,
+                    global_state,
+                    skill_set,
+                    active_abilities.get(entity).unwrap_or(&Default::default()),
+                    inventory,
+                    char_state,
+                    health,
+                    energy,
+                    poise,
+                    body,
+                    uid,
+                    &msm,
+                    &self.imgs,
+                    &self.item_imgs,
+                    &self.fonts,
+                    i18n,
+                    &self.item_i18n,
+                    &self.rot_imgs,
+                    tooltip_manager,
+                    &mut self.slot_manager,
+                    self.pulse,
+                    stances.get(entity),
+                    combo,
+                    stats.get(entity),
+                    buffs.get(entity),
+                )
+                .set(self.ids.diary, ui_widgets)
+                {
+                    match event {
+                        diary::Event::Close => {
+                            self.show.diary(false);
+                            self.show.want_grab = true;
+                            self.force_ungrab = false;
+                        },
+                        diary::Event::ChangeSkillTree(tree_sel) => {
+                            self.show.open_skill_tree(tree_sel)
+                        },
+                        diary::Event::UnlockSkill(skill) => events.push(Event::UnlockSkill(skill)),
+                        diary::Event::ChangeSection(section) => {
+                            self.show.diary_fields.section = section;
+                        },
+                        diary::Event::SelectExpBar(xp_bar) => {
+                            events.push(Event::SelectExpBar(xp_bar))
+                        },
+                    }
+                }
+            }
+        }
+        // Map
+        if self.show.map {
+            let mut persisted_state = self.persisted_state.borrow_mut();
+            for event in Map::new(
+                client,
+                &self.imgs,
+                &self.rot_imgs,
+                &self.world_map,
+                &self.fonts,
+                self.pulse,
+                i18n,
+                global_state,
+                tooltip_manager,
+                &persisted_state.location_markers,
+                self.map_drag,
+                &self.extra_markers,
+            )
+            .set(self.ids.map, ui_widgets)
+            {
+                match event {
+                    map::Event::Close => {
+                        self.show.map(false);
+                        self.show.want_grab = true;
+                        self.force_ungrab = false;
+                    },
+                    map::Event::OpenPropertyMarketplace => {
+                        self.show.map(false);
+                        self.property_panel_open = true;
+                        self.property_selected = None;
+                        events.push(Event::RequestPropertyParcels);
+                        self.show.want_grab = false;
+                    },
+                    map::Event::SettingsChange(settings_change) => {
+                        events.push(Event::SettingsChange(settings_change.into()));
+                    },
+                    map::Event::RequestSiteInfo(id) => {
+                        events.push(Event::RequestSiteInfo(id));
+                    },
+                    map::Event::SetLocationMarker(pos) => {
+                        events.push(Event::MapMarkerEvent(MapMarkerChange::Update(pos)));
+                        persisted_state
+                            .location_markers
+                            .update(comp::MapMarkerUpdate::Owned(MapMarkerChange::Update(pos)));
+                    },
+                    map::Event::MapDrag(new_drag) => {
+                        self.map_drag = new_drag;
+                    },
+                    map::Event::RemoveMarker => {
+                        persisted_state
+                            .location_markers
+                            .update(comp::MapMarkerUpdate::Owned(MapMarkerChange::Remove));
+                        events.push(Event::MapMarkerEvent(MapMarkerChange::Remove));
+                    },
+                }
+            }
+        } else {
+            // Reset the map position when it's not showing
+            self.map_drag = Vec2::zero();
+        }
+
+        if self.show.esc_menu {
+            match EscMenu::new(&self.imgs, &self.fonts, i18n).set(self.ids.esc_menu, ui_widgets) {
+                Some(esc_menu::Event::OpenSettings(tab)) => {
+                    self.show.open_setting_tab(tab);
+                },
+                Some(esc_menu::Event::Close) => {
+                    self.show.esc_menu = false;
+                    self.show.want_grab = true;
+                    self.force_ungrab = false;
+
+                    // Unpause the game if we are on singleplayer
+                    #[cfg(feature = "singleplayer")]
+                    global_state.unpause();
+                },
+                Some(esc_menu::Event::Logout) => {
+                    // Unpause the game if we are on singleplayer so that we can logout
+                    #[cfg(feature = "singleplayer")]
+                    global_state.unpause();
+
+                    events.push(Event::Logout);
+                },
+                Some(esc_menu::Event::Quit) => events.push(Event::Quit),
+                Some(esc_menu::Event::CharacterSelection) => {
+                    // Unpause the game if we are on singleplayer so that we can logout
+                    #[cfg(feature = "singleplayer")]
+                    global_state.unpause();
+
+                    events.push(Event::CharacterSelection)
+                },
+                None => {},
+            }
+        }
+
+        let mut indicator_offset = 40.0;
+
+        // Free look indicator
+        if let Some(freelook_key) = global_state
+            .settings
+            .controls
+            .get_binding(GameInput::FreeLook)
+            && self.show.free_look
+        {
+            let msg = i18n.get_msg_ctx("hud-free_look_indicator", &i18n::fluent_args! {
+                "key" => freelook_key.display_string(),
+                "toggle" => global_state.settings.gameplay.free_look_behavior as usize,
+            });
+            Text::new(&msg)
+                .color(TEXT_BG)
+                .mid_top_with_margin_on(ui_widgets.window, indicator_offset)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.free_look_bg, ui_widgets);
+            indicator_offset += 30.0;
+            Text::new(&msg)
+                .color(KILL_COLOR)
+                .top_left_with_margins_on(self.ids.free_look_bg, -1.0, -1.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.free_look_txt, ui_widgets);
+        };
+
+        // Auto walk indicator
+        if self.show.auto_walk {
+            Text::new(&i18n.get_msg("hud-auto_walk_indicator"))
+                .color(TEXT_BG)
+                .mid_top_with_margin_on(ui_widgets.window, indicator_offset)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.auto_walk_bg, ui_widgets);
+            indicator_offset += 30.0;
+            Text::new(&i18n.get_msg("hud-auto_walk_indicator"))
+                .color(KILL_COLOR)
+                .top_left_with_margins_on(self.ids.auto_walk_bg, -1.0, -1.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.auto_walk_txt, ui_widgets);
+        }
+
+        // Camera zoom lock
+        self.show.zoom_lock.update(dt);
+
+        if let Some(zoom_lock) = self.show.zoom_lock.reason {
+            let zoom_lock_message = match zoom_lock {
+                NotificationReason::Remind => "hud-zoom_lock_indicator-remind",
+                NotificationReason::Enable => "hud-zoom_lock_indicator-enable",
+                NotificationReason::Disable => "hud-zoom_lock_indicator-disable",
+            };
+
+            Text::new(&i18n.get_msg(zoom_lock_message))
+                .color(TEXT_BG.alpha(self.show.zoom_lock.alpha))
+                .mid_top_with_margin_on(ui_widgets.window, indicator_offset)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.zoom_lock_bg, ui_widgets);
+            indicator_offset += 30.0;
+            Text::new(&i18n.get_msg(zoom_lock_message))
+                .color(TEXT_COLOR.alpha(self.show.zoom_lock.alpha))
+                .top_left_with_margins_on(self.ids.zoom_lock_bg, -1.0, -1.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.zoom_lock_txt, ui_widgets);
+        }
+
+        // Camera clamp indicator
+        if let Some(cameraclamp_key) = global_state
+            .settings
+            .controls
+            .get_binding(GameInput::CameraClamp)
+            && self.show.camera_clamp
+        {
+            let msg = i18n.get_msg_ctx("hud-camera_clamp_indicator", &i18n::fluent_args! {
+                "key" => cameraclamp_key.display_string(),
+            });
+            Text::new(&msg)
+                .color(TEXT_BG)
+                .mid_top_with_margin_on(ui_widgets.window, indicator_offset)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.camera_clamp_bg, ui_widgets);
+            Text::new(&msg)
+                .color(KILL_COLOR)
+                .top_left_with_margins_on(self.ids.camera_clamp_bg, -1.0, -1.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(20))
+                .set(self.ids.camera_clamp_txt, ui_widgets);
+        }
+
+        // Maintain slot manager
+        'slot_events: for event in self.slot_manager.maintain(ui_widgets) {
+            use slots::{AbilitySlot, InventorySlot, SlotKind::*};
+            let to_slot = |slot_kind| match slot_kind {
+                Inventory(
+                    i @ InventorySlot {
+                        slot: Slot::Inventory(_) | Slot::Overflow(_),
+                        ours: true,
+                        ..
+                    },
+                ) => Some(i.slot),
+                Inventory(InventorySlot {
+                    slot: Slot::Equip(_),
+                    ours: true,
+                    ..
+                }) => None,
+                Inventory(InventorySlot { ours: false, .. }) => None,
+                Equip(e) => Some(Slot::Equip(e)),
+                Hotbar(_) => None,
+                Trade(_) => None,
+                Ability(_) => None,
+                Crafting(_) => None,
+            };
+            match event {
+                slot::Event::Dragged(a, b) => {
+                    // Swap between slots
+                    if let (Some(a), Some(b)) = (to_slot(a), to_slot(b)) {
+                        events.push(Event::SwapSlots {
+                            slot_a: a,
+                            slot_b: b,
+                            bypass_dialog: false,
+                        });
+                    } else if let (
+                        Inventory(InventorySlot {
+                            slot, ours: true, ..
+                        }),
+                        Hotbar(h),
+                    ) = (a, b)
+                    {
+                        if let Slot::Inventory(slot) = slot
+                            && let Some(item) = inventories
+                                .get(info.viewpoint_entity)
+                                .and_then(|inv| inv.get(slot))
+                        {
+                            self.hotbar.add_inventory_link(h, item);
+                            events.push(Event::ChangeHotbarState(Box::new(self.hotbar.to_owned())));
+                        }
+                    } else if let (Hotbar(a), Hotbar(b)) = (a, b) {
+                        self.hotbar.swap(a, b);
+                        events.push(Event::ChangeHotbarState(Box::new(self.hotbar.to_owned())));
+                    } else if let (Inventory(i), Trade(t)) = (a, b) {
+                        if i.ours == t.ours
+                            && let (Some(inventory), Slot::Inventory(slot)) =
+                                (inventories.get(t.entity), i.slot)
+                        {
+                            events.push(Event::TradeAction(TradeAction::AddItem {
+                                item: slot,
+                                quantity: i.amount(inventory).unwrap_or(1),
+                                ours: i.ours,
+                            }));
+                        }
+                    } else if let (Trade(t), Inventory(i)) = (a, b) {
+                        if i.ours == t.ours
+                            && let Some(inventory) = inventories.get(t.entity)
+                            && let Some(invslot) = t.invslot
+                        {
+                            events.push(Event::TradeAction(TradeAction::RemoveItem {
+                                item: invslot,
+                                quantity: t.amount(inventory).unwrap_or(1),
+                                ours: t.ours,
+                            }));
+                        }
+                    } else if let (Ability(a), Ability(b)) = (a, b) {
+                        match (a, b) {
+                            (AbilitySlot::Ability(ability), AbilitySlot::Slot(index)) => {
+                                events.push(Event::ChangeAbility(index, ability));
+                            },
+                            (AbilitySlot::Slot(a), AbilitySlot::Slot(b)) => {
+                                let me = info.viewpoint_entity;
+                                if let Some(active_abilities) = active_abilities.get(me) {
+                                    let ability_a = active_abilities
+                                        .auxiliary_set(inventories.get(me), skill_sets.get(me))
+                                        .get(a)
+                                        .copied()
+                                        .unwrap_or(AuxiliaryAbility::Empty);
+                                    let ability_b = active_abilities
+                                        .auxiliary_set(inventories.get(me), skill_sets.get(me))
+                                        .get(b)
+                                        .copied()
+                                        .unwrap_or(AuxiliaryAbility::Empty);
+                                    events.push(Event::ChangeAbility(a, ability_b));
+                                    events.push(Event::ChangeAbility(b, ability_a));
+                                }
+                            },
+                            (AbilitySlot::Slot(index), _) => {
+                                events.push(Event::ChangeAbility(index, AuxiliaryAbility::Empty));
+                            },
+                            (AbilitySlot::Ability(_), AbilitySlot::Ability(_)) => {},
+                        }
+                    } else if let (Inventory(i), Crafting(c)) = (a, b) {
+                        if let Slot::Inventory(slot) = i.slot {
+                            // Add item to crafting input
+                            if inventories
+                                .get(info.viewpoint_entity)
+                                .and_then(|inv| inv.get(slot))
+                                .is_some_and(|item| {
+                                    (c.requirement)(item, client.component_recipe_book(), c.info)
+                                })
+                            {
+                                self.show
+                                    .crafting_fields
+                                    .recipe_inputs
+                                    .insert(c.index, i.slot);
+                            }
+                        }
+                    } else if let (Equip(e), Crafting(c)) = (a, b) {
+                        // Add item to crafting input
+                        if inventories
+                            .get(client.entity())
+                            .and_then(|inv| inv.equipped(e))
+                            .is_some_and(|item| {
+                                (c.requirement)(item, client.component_recipe_book(), c.info)
+                            })
+                        {
+                            self.show
+                                .crafting_fields
+                                .recipe_inputs
+                                .insert(c.index, Slot::Equip(e));
+                        }
+                    } else if let (Crafting(c), Inventory(_)) = (a, b) {
+                        // Remove item from crafting input
+                        self.show.crafting_fields.recipe_inputs.remove(&c.index);
+                    } else if let (Ability(AbilitySlot::Ability(ability)), Hotbar(slot)) = (a, b)
+                        && let Some(Some(HotbarSlotContents::Ability(index))) =
+                            self.hotbar.slots.get(slot as usize)
+                    {
+                        events.push(Event::ChangeAbility(*index, ability));
+                    }
+                },
+                slot::Event::Dropped(from) => {
+                    // Drop item
+                    if let Some(from) = to_slot(from) {
+                        events.push(Event::DropSlot(from));
+                    } else if let Hotbar(h) = from {
+                        self.hotbar.clear_slot(h);
+                        events.push(Event::ChangeHotbarState(Box::new(self.hotbar.to_owned())));
+                    } else if let Trade(t) = from {
+                        if let Some(inventory) = inventories.get(t.entity)
+                            && let Some(invslot) = t.invslot
+                        {
+                            events.push(Event::TradeAction(TradeAction::RemoveItem {
+                                item: invslot,
+                                quantity: t.amount(inventory).unwrap_or(1),
+                                ours: t.ours,
+                            }));
+                        }
+                    } else if let Ability(AbilitySlot::Slot(index)) = from {
+                        events.push(Event::ChangeAbility(index, AuxiliaryAbility::Empty));
+                    } else if let Crafting(c) = from {
+                        // Remove item from crafting input
+                        self.show.crafting_fields.recipe_inputs.remove(&c.index);
+                    }
+                },
+                slot::Event::SplitDropped(from) => {
+                    // Drop item
+                    if let Some(from) = to_slot(from) {
+                        events.push(Event::SplitDropSlot(from));
+                    } else if let Hotbar(h) = from {
+                        self.hotbar.clear_slot(h);
+                        events.push(Event::ChangeHotbarState(Box::new(self.hotbar.to_owned())));
+                    } else if let Ability(AbilitySlot::Slot(index)) = from {
+                        events.push(Event::ChangeAbility(index, AuxiliaryAbility::Empty));
+                    }
+                },
+                slot::Event::SplitDragged(a, b) => {
+                    // Swap between slots
+                    if let (Some(a), Some(b)) = (to_slot(a), to_slot(b)) {
+                        events.push(Event::SplitSwapSlots {
+                            slot_a: a,
+                            slot_b: b,
+                            bypass_dialog: false,
+                        });
+                    } else if let (Inventory(i), Hotbar(h)) = (a, b) {
+                        if let Slot::Inventory(slot) = i.slot
+                            && let Some(item) = inventories
+                                .get(info.viewpoint_entity)
+                                .and_then(|inv| inv.get(slot))
+                        {
+                            self.hotbar.add_inventory_link(h, item);
+                            events.push(Event::ChangeHotbarState(Box::new(self.hotbar.to_owned())));
+                        }
+                    } else if let (Hotbar(a), Hotbar(b)) = (a, b) {
+                        self.hotbar.swap(a, b);
+                        events.push(Event::ChangeHotbarState(Box::new(self.hotbar.to_owned())));
+                    } else if let (Inventory(i), Trade(t)) = (a, b) {
+                        if i.ours == t.ours
+                            && let (Some(inventory), Slot::Inventory(slot)) =
+                                (inventories.get(t.entity), i.slot)
+                        {
+                            events.push(Event::TradeAction(TradeAction::AddItem {
+                                item: slot,
+                                quantity: i.amount(inventory).unwrap_or(1) / 2,
+                                ours: i.ours,
+                            }));
+                        }
+                    } else if let (Trade(t), Inventory(i)) = (a, b) {
+                        if i.ours == t.ours
+                            && let Some(inventory) = inventories.get(t.entity)
+                            && let Some(invslot) = t.invslot
+                        {
+                            events.push(Event::TradeAction(TradeAction::RemoveItem {
+                                item: invslot,
+                                quantity: t.amount(inventory).unwrap_or(1) / 2,
+                                ours: t.ours,
+                            }));
+                        }
+                    } else if let (Ability(a), Ability(b)) = (a, b) {
+                        match (a, b) {
+                            (AbilitySlot::Ability(ability), AbilitySlot::Slot(index)) => {
+                                events.push(Event::ChangeAbility(index, ability));
+                            },
+                            (AbilitySlot::Slot(a), AbilitySlot::Slot(b)) => {
+                                let me = info.viewpoint_entity;
+                                if let Some(active_abilities) = active_abilities.get(me) {
+                                    let ability_a = active_abilities
+                                        .auxiliary_set(inventories.get(me), skill_sets.get(me))
+                                        .get(a)
+                                        .copied()
+                                        .unwrap_or(AuxiliaryAbility::Empty);
+                                    let ability_b = active_abilities
+                                        .auxiliary_set(inventories.get(me), skill_sets.get(me))
+                                        .get(b)
+                                        .copied()
+                                        .unwrap_or(AuxiliaryAbility::Empty);
+                                    events.push(Event::ChangeAbility(a, ability_b));
+                                    events.push(Event::ChangeAbility(b, ability_a));
+                                }
+                            },
+                            (AbilitySlot::Slot(index), _) => {
+                                events.push(Event::ChangeAbility(index, AuxiliaryAbility::Empty));
+                            },
+                            (AbilitySlot::Ability(_), AbilitySlot::Ability(_)) => {},
+                        }
+                    }
+                },
+                slot::Event::Used(from) => {
+                    // Item used (selected and then clicked again)
+                    if let Some(from) = to_slot(from) {
+                        if self.show.crafting_fields.salvage
+                            && matches!(
+                                self.show.crafting_fields.crafting_tab,
+                                CraftingTab::Dismantle
+                            )
+                        {
+                            if let (Slot::Inventory(slot), Some((salvage_pos, _sprite_kind))) =
+                                (from, self.show.crafting_fields.craft_sprite)
+                            {
+                                events.push(Event::SalvageItem { slot, salvage_pos })
+                            }
+                        } else {
+                            events.push(Event::UseSlot {
+                                slot: from,
+                                bypass_dialog: false,
+                            });
+                        }
+                    } else if let Hotbar(h) = from {
+                        // Used from hotbar
+                        self.hotbar.get(h).map(|s| match s {
+                            hotbar::SlotContents::Inventory(i, _) => {
+                                if let Some(inv) = inventories.get(info.viewpoint_entity) {
+                                    // If the item in the inactive main hand is the same as the item
+                                    // pressed in the hotbar, then swap active and inactive hands
+                                    // instead of looking for
+                                    // the item in the inventory
+                                    if inv
+                                        .equipped(comp::slot::EquipSlot::InactiveMainhand)
+                                        .is_some_and(|item| item.item_hash() == i)
+                                    {
+                                        events.push(Event::SwapEquippedWeapons);
+                                    } else if let Some(slot) = inv.get_slot_from_hash(i) {
+                                        events.push(Event::UseSlot {
+                                            slot: Slot::Inventory(slot),
+                                            bypass_dialog: false,
+                                        });
+                                    }
+                                }
+                            },
+                            hotbar::SlotContents::Ability(_) => {},
+                        });
+                    } else if let Ability(AbilitySlot::Slot(index)) = from {
+                        events.push(Event::ChangeAbility(index, AuxiliaryAbility::Empty));
+                    } else if let Crafting(c) = from {
+                        // Remove item from crafting input
+                        self.show.crafting_fields.recipe_inputs.remove(&c.index);
+                    }
+                },
+                slot::Event::Request {
+                    slot,
+                    auto_quantity,
+                } => {
+                    if let Some((_, trade, prices)) = client.pending_trade() {
+                        let ecs = client.state().ecs();
+                        let inventories = ecs.read_component::<comp::Inventory>();
+                        let get_inventory = |uid: Uid| {
+                            if let Some(entity) = ecs.entity_from_uid(uid) {
+                                inventories.get(entity)
+                            } else {
+                                None
+                            }
+                        };
+                        let mut r_inventories = [None, None];
+                        for (i, party) in trade.parties.iter().enumerate() {
+                            match get_inventory(*party) {
+                                Some(inventory) => {
+                                    r_inventories[i] = Some(ReducedInventory::from(inventory))
+                                },
+                                None => continue 'slot_events,
+                            };
+                        }
+                        let who = match ecs
+                            .uid_from_entity(info.viewpoint_entity)
+                            .and_then(|uid| trade.which_party(uid))
+                        {
+                            Some(who) => who,
+                            None => continue 'slot_events,
+                        };
+                        let do_auto_quantity =
+                            |inventory: &comp::Inventory,
+                             slot,
+                             ours,
+                             remove,
+                             quantity: &mut u32| {
+                                if let Some(prices) = prices
+                                    && let Some((balance0, balance1)) = prices
+                                        .balance(&trade.offers, &r_inventories, who, true)
+                                        .zip(prices.balance(
+                                            &trade.offers,
+                                            &r_inventories,
+                                            1 - who,
+                                            false,
+                                        ))
+                                    && let Some(item) = inventory.get(slot)
+                                    && let Some(materials) =
+                                        TradePricing::get_materials(&item.item_definition_id())
+                                {
+                                    let unit_price: f32 = materials
+                                        .iter()
+                                        .map(|e| {
+                                            prices.values.get(&e.1).cloned().unwrap_or_default()
+                                                * e.0
+                                        })
+                                        .sum::<f32>()
+                                        * (if ours {
+                                            TradePricing::good_from_itemdef_id(
+                                                item.item_definition_id(),
+                                            )
+                                            .sell_discount(item.quality())
+                                        } else {
+                                            1.0
+                                        });
+
+                                    let mut float_delta = if ours ^ remove {
+                                        (balance1 - balance0) / unit_price
+                                    } else {
+                                        (balance0 - balance1) / unit_price
+                                    };
+                                    if ours ^ remove {
+                                        float_delta = float_delta.ceil();
+                                    } else {
+                                        float_delta = float_delta.floor();
+                                    }
+                                    *quantity = float_delta.max(0.0) as u32;
+                                }
+                            };
+                        match slot {
+                            Inventory(i) => {
+                                if let Some(inventory) = inventories.get(i.entity)
+                                    && let Slot::Inventory(slot) = i.slot
+                                {
+                                    let mut quantity = 1;
+                                    if auto_quantity {
+                                        do_auto_quantity(
+                                            inventory,
+                                            slot,
+                                            i.ours,
+                                            false,
+                                            &mut quantity,
+                                        );
+                                        let inv_quantity = i.amount(inventory).unwrap_or(1);
+                                        quantity = quantity.min(inv_quantity);
+                                    }
+
+                                    events.push(Event::TradeAction(TradeAction::AddItem {
+                                        item: slot,
+                                        quantity,
+                                        ours: i.ours,
+                                    }));
+                                }
+                            },
+                            Trade(t) => {
+                                if let Some(inventory) = inventories.get(t.entity)
+                                    && let Some(invslot) = t.invslot
+                                {
+                                    let mut quantity = 1;
+                                    if auto_quantity {
+                                        do_auto_quantity(
+                                            inventory,
+                                            invslot,
+                                            t.ours,
+                                            true,
+                                            &mut quantity,
+                                        );
+                                        let inv_quantity = t.amount(inventory).unwrap_or(1);
+                                        quantity = quantity.min(inv_quantity);
+                                    }
+                                    events.push(Event::TradeAction(TradeAction::RemoveItem {
+                                        item: invslot,
+                                        quantity,
+                                        ours: t.ours,
+                                    }));
+                                }
+                            },
+                            _ => {},
+                        }
+                    }
+                },
+            }
+        }
+        self.hotbar.maintain_abilities(client, &info);
+
+        // Temporary Example Quest
+        let arrow_ani = (self.pulse * 4.0/* speed factor */).cos() * 0.5 + 0.8; //Animation timer
+        let show_intro = self.show.intro; // borrow check doesn't understand closures
+        if let Some(toggle_cursor_key) = global_state
+            .settings
+            .controls
+            .get_binding(GameInput::ToggleCursor)
+            .filter(|_| !show_intro)
+        {
+            prof_span!("temporary example quest");
+            match global_state.settings.interface.intro_show {
+                Intro::Show => {
+                    if Button::image(self.imgs.button)
+                        .w_h(200.0, 60.0)
+                        .hover_image(self.imgs.button_hover)
+                        .press_image(self.imgs.button_press)
+                        .bottom_left_with_margins_on(ui_widgets.window, 350.0, 150.0)
+                        .label(&i18n.get_msg("hud-tutorial_btn"))
+                        .label_font_id(self.fonts.cyri.conrod_id)
+                        .label_font_size(self.fonts.cyri.scale(18))
+                        .label_color(TEXT_COLOR)
+                        .label_y(conrod_core::position::Relative::Scalar(2.0))
+                        .image_color(ENEMY_HP_COLOR)
+                        .set(self.ids.intro_button, ui_widgets)
+                        .was_clicked()
+                    {
+                        self.show.intro = true;
+                        self.show.want_grab = true;
+                    }
+                    let tutorial_click_msg =
+                        i18n.get_msg_ctx("hud-tutorial_click_here", &i18n::fluent_args! {
+                            "key" => toggle_cursor_key.display_string(),
+                        });
+                    Image::new(self.imgs.sp_indicator_arrow)
+                        .w_h(20.0, 11.0)
+                        .mid_top_with_margin_on(self.ids.intro_button, -20.0 + arrow_ani as f64)
+                        .color(Some(QUALITY_LEGENDARY))
+                        .set(self.ids.tut_arrow, ui_widgets);
+                    Text::new(&tutorial_click_msg)
+                        .mid_top_with_margin_on(self.ids.tut_arrow, -40.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(14))
+                        .center_justify()
+                        .color(BLACK)
+                        .set(self.ids.tut_arrow_txt_bg, ui_widgets);
+                    Text::new(&tutorial_click_msg)
+                        .bottom_right_with_margins_on(self.ids.tut_arrow_txt_bg, 1.0, 1.0)
+                        .center_justify()
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(14))
+                        .color(QUALITY_LEGENDARY)
+                        .set(self.ids.tut_arrow_txt, ui_widgets);
+                },
+                Intro::Never => {
+                    self.show.intro = false;
+                },
+            }
+        }
+        // TODO: Add event/stat based tutorial system
+        if self.show.intro && !self.show.esc_menu {
+            prof_span!("intro show");
+            match global_state.settings.interface.intro_show {
+                Intro::Show => {
+                    if self.show.intro {
+                        self.show.want_grab = false;
+                        let quest_headline = i18n.get_msg("hud-temp_quest_headline");
+                        let quest_text = i18n.get_msg("hud-temp_quest_text");
+                        Image::new(self.imgs.quest_bg0)
+                            .w_h(404.0, 858.0)
+                            .middle_of(ui_widgets.window)
+                            .set(self.ids.quest_bg, ui_widgets);
+
+                        Text::new(&quest_headline)
+                            .mid_top_with_margin_on(self.ids.quest_bg, 310.0)
+                            .font_size(self.fonts.cyri.scale(30))
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(TEXT_BG)
+                            .set(self.ids.q_headline_bg, ui_widgets);
+                        Text::new(&quest_headline)
+                            .bottom_left_with_margins_on(self.ids.q_headline_bg, 1.0, 1.0)
+                            .font_size(self.fonts.cyri.scale(30))
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(TEXT_COLOR)
+                            .set(self.ids.q_headline, ui_widgets);
+
+                        Text::new(&quest_text)
+                            .mid_top_with_margin_on(self.ids.quest_bg, 360.0)
+                            .w(350.0)
+                            .font_size(self.fonts.cyri.scale(17))
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(TEXT_BG)
+                            .set(self.ids.q_text_bg, ui_widgets);
+                        Text::new(&quest_text)
+                            .bottom_left_with_margins_on(self.ids.q_text_bg, 1.0, 1.0)
+                            .w(350.0)
+                            .font_size(self.fonts.cyri.scale(17))
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .color(TEXT_COLOR)
+                            .set(self.ids.q_text, ui_widgets);
+
+                        if Button::image(self.imgs.button)
+                            .w_h(212.0, 52.0)
+                            .hover_image(self.imgs.button_hover)
+                            .press_image(self.imgs.button_press)
+                            .mid_bottom_with_margin_on(self.ids.q_text_bg, -80.0)
+                            .label(&i18n.get_msg("common-close"))
+                            .label_font_id(self.fonts.cyri.conrod_id)
+                            .label_font_size(self.fonts.cyri.scale(22))
+                            .label_color(TEXT_COLOR)
+                            .label_y(conrod_core::position::Relative::Scalar(2.0))
+                            .set(self.ids.accept_button, ui_widgets)
+                            .was_clicked()
+                        {
+                            self.show.intro = false;
+                            events.push(Event::SettingsChange(
+                                InterfaceChange::Intro(Intro::Never).into(),
+                            ));
+                            self.show.want_grab = true;
+                        }
+                        if !self.show.crafting && !self.show.bag {
+                            Image::new(self.imgs.sp_indicator_arrow)
+                                .w_h(20.0, 11.0)
+                                .bottom_right_with_margins_on(
+                                    ui_widgets.window,
+                                    40.0 + arrow_ani as f64,
+                                    205.0,
+                                )
+                                .color(Some(QUALITY_LEGENDARY))
+                                .set(self.ids.tut_arrow, ui_widgets);
+                            Text::new(&i18n.get_msg("hud-tutorial_elements"))
+                                .mid_top_with_margin_on(self.ids.tut_arrow, -50.0)
+                                .font_id(self.fonts.cyri.conrod_id)
+                                .font_size(self.fonts.cyri.scale(40))
+                                .color(BLACK)
+                                .floating(true)
+                                .set(self.ids.tut_arrow_txt_bg, ui_widgets);
+                            Text::new(&i18n.get_msg("hud-tutorial_elements"))
+                                .bottom_right_with_margins_on(self.ids.tut_arrow_txt_bg, 1.0, 1.0)
+                                .font_id(self.fonts.cyri.conrod_id)
+                                .font_size(self.fonts.cyri.scale(40))
+                                .color(QUALITY_LEGENDARY)
+                                .floating(true)
+                                .set(self.ids.tut_arrow_txt, ui_widgets);
+                        }
+                    }
+                },
+                Intro::Never => {
+                    self.show.intro = false;
+                },
+            }
+        }
+
+        // if a menu is open, notify window so it can restrict GameInputs
+        global_state.window.menu_open = !self.show.focus.is_empty();
+
+        self.menu_events.clear(); // clear all menu inputs after they have been read
+        events
+    }
+
+    fn show_bag(slot_manager: &mut slots::SlotManager, show: &mut Show, state: bool) {
+        show.bag(state);
+        if !state {
+            slot_manager.idle();
+        }
+    }
+
+    pub fn add_failed_block_pickup(&mut self, pos: VolumePos, reason: HudCollectFailedReason) {
+        self.failed_block_pickups
+            .insert(pos, CollectFailedData::new(self.pulse, reason));
+    }
+
+    pub fn add_failed_entity_pickup(&mut self, entity: EcsEntity, reason: HudCollectFailedReason) {
+        self.failed_entity_pickups
+            .insert(entity, CollectFailedData::new(self.pulse, reason));
+    }
+
+    pub fn new_loot_message(&mut self, item: LootMessage) {
+        self.new_loot_messages.push_back(item);
+    }
+
+    pub fn dialogue(
+        &mut self,
+        sender: EcsEntity,
+        player_pos: Vec3<f32>,
+        dialogue: rtsim::Dialogue<true>,
+        global_state: &mut GlobalState,
+    ) {
+        match dialogue.kind {
+            rtsim::DialogueKind::Marker(marker) => {
+                // Remove any existing markers with the same ID
+                self.extra_markers.retain(|em| !em.marker.is_same(&marker));
+                global_state.profile.tutorial.event_map_marker();
+                self.extra_markers.push(map::ExtraMarker {
+                    recv_pos: player_pos.xy(),
+                    marker,
+                });
+            },
+            rtsim::DialogueKind::End => {
+                if self
+                    .current_dialogue
+                    .take_if(|(old_sender, _, _)| *old_sender == sender)
+                    .is_some()
+                {
+                    self.show.quest(false);
+                }
+            },
+            _ => {
+                if !self.show.quest
+                    || self
+                        .current_dialogue
+                        .as_ref()
+                        .is_none_or(|(old_sender, _, _)| *old_sender == sender)
+                {
+                    self.show.quest(true);
+                    self.current_dialogue = Some((sender, Instant::now(), dialogue));
+                }
+            },
+        }
+    }
+
+    pub fn new_message(&mut self, msg: comp::ChatMsg) { self.new_messages.push_back(msg); }
+
+    pub fn set_property_parcels(&mut self, parcels: Vec<common_net::msg::PropertyParcelInfo>) {
+        let marketplace_parcel_id = std::env::var("VELOREN_MARKETPLACE_PARCEL_ID")
+            .unwrap_or_else(|_| "DEV-LAND-0002".to_string());
+        self.property_parcels = parcels
+            .into_iter()
+            .filter(|parcel| parcel.id == marketplace_parcel_id)
+            .collect();
+        self.property_selected = (!self.property_parcels.is_empty()).then_some(0);
+        self.property_panel_open = true;
+        self.property_status = None;
+        self.show.want_grab = false;
+    }
+
+    pub fn set_property_purchase_status(&mut self, message: String) {
+        self.property_status = Some(message);
+    }
+
+    pub fn selected_property_id(&self) -> Option<String> {
+        self.property_selected
+            .and_then(|index| self.property_parcels.get(index))
+            .map(|parcel| parcel.id.clone())
+    }
+
+    pub fn open_property_panel(&mut self) {
+        self.property_panel_open = true;
+        self.show.want_grab = false;
+    }
+
+    pub fn new_notification(&mut self, msg: UserNotification) {
+        self.new_notifications.push_back(msg);
+    }
+
+    pub fn set_scaling_mode(&mut self, scale_mode: ScaleMode) {
+        self.ui.set_scaling_mode(scale_mode);
+    }
+
+    pub fn scale_change(&mut self, scale_change: ScaleChange) -> ScaleMode {
+        let scale_mode = match scale_change {
+            ScaleChange::Adjust(scale) => ScaleMode::Absolute(scale),
+            ScaleChange::ToAbsolute => self.ui.scale().scaling_mode_as_absolute(),
+            ScaleChange::ToRelative => self.ui.scale().scaling_mode_as_relative(),
+        };
+        self.ui.set_scaling_mode(scale_mode);
+        scale_mode
+    }
+
+    /// Checks if a TextEdit widget has the keyboard captured.
+    fn typing(&self) -> bool { Hud::is_captured::<widget::TextEdit>(&self.ui.ui) }
+
+    /// Checks if a widget of type `W` has captured the keyboard
+    fn is_captured<W: Widget>(ui: &conrod_core::Ui) -> bool {
+        if let Some(id) = ui.global_input().current.widget_capturing_keyboard {
+            ui.widget_graph()
+                .widget(id)
+                .filter(|c| c.type_id == std::any::TypeId::of::<<W as Widget>::State>())
+                .is_some()
+        } else {
+            false
+        }
+    }
+
+    pub fn handle_event(
+        &mut self,
+        event: WinEvent,
+        global_state: &mut GlobalState,
+        client_inventory: Option<&comp::Inventory>,
+    ) -> bool {
+        // Helper
+        fn handle_slot(
+            slot: hotbar::Slot,
+            state: bool,
+            events: &mut Vec<Event>,
+            slot_manager: &mut slots::SlotManager,
+            hotbar: &mut hotbar::State,
+            client_inventory: Option<&comp::Inventory>,
+        ) {
+            use slots::InventorySlot;
+            if let Some(slots::SlotKind::Inventory(InventorySlot {
+                slot: Slot::Inventory(i),
+                ours: true,
+                ..
+            })) = slot_manager.selected()
+            {
+                if let Some(item) = client_inventory.and_then(|inv| inv.get(i)) {
+                    hotbar.add_inventory_link(slot, item);
+                    events.push(Event::ChangeHotbarState(Box::new(hotbar.to_owned())));
+                    slot_manager.idle();
+                }
+            } else {
+                let just_pressed = hotbar.process_input(slot, state);
+                hotbar.get(slot).map(|s| match s {
+                    hotbar::SlotContents::Inventory(i, _) => {
+                        if just_pressed && let Some(inv) = client_inventory {
+                            // If the item in the inactive main hand is the same as the item
+                            // pressed in the hotbar, then swap active and inactive hands
+                            // instead of looking for the item
+                            // in the inventory
+                            if inv
+                                .equipped(comp::slot::EquipSlot::InactiveMainhand)
+                                .is_some_and(|item| item.item_hash() == i)
+                            {
+                                events.push(Event::SwapEquippedWeapons);
+                            } else if let Some(slot) = inv.get_slot_from_hash(i) {
+                                events.push(Event::UseSlot {
+                                    slot: comp::slot::Slot::Inventory(slot),
+                                    bypass_dialog: false,
+                                });
+                            }
+                        }
+                    },
+                    hotbar::SlotContents::Ability(idx) => {
+                        events.push(Event::Ability { idx, state })
+                    },
+                });
+            }
+        }
+
+        #[instrument(skip(show, global_state))]
+        fn handle_map_zoom(
+            factor: f64,
+            world_size: Vec2<u32>,
+            show: &Show,
+            global_state: &mut GlobalState,
+        ) -> bool {
+            trace!("Handling map Zoom");
+
+            let max_zoom = world_size.reduce_partial_max() as f64;
+
+            if show.map {
+                let new_zoom_lvl = (global_state.settings.interface.map_zoom * factor)
+                    .clamped(1.25, max_zoom / 64.0);
+                global_state.settings.interface.map_zoom = new_zoom_lvl;
+            } else if global_state.settings.interface.minimap_show {
+                // Duplicated code from voxygen/src/hud/minimap.rs:522 in the update fn
+                // TODO: Consolidate minimap zooming, because having duplicate handlers for
+                // hotkey and interface is error prone. Find the other occurrence by searching
+                // for this comment. Don't forget to update the code in
+                // minimap.rs when updating this!
+                let min_zoom = 1.0;
+                let max_zoom = world_size
+                    .reduce_partial_max() as f64/*.min(f64::MAX)*/;
+
+                let new_zoom_lvl = (global_state.settings.interface.minimap_zoom * factor)
+                    .clamped(min_zoom, max_zoom);
+                global_state.settings.interface.minimap_zoom = new_zoom_lvl;
+            }
+
+            show.map && global_state.settings.interface.minimap_show
+        }
+
+        let cursor_grabbed = global_state.window.is_cursor_grabbed();
+        let handled = match event {
+            WinEvent::Ui(event) => {
+                if (self.typing() && event.is_keyboard() && self.show.ui)
+                    || !(cursor_grabbed && event.is_keyboard_or_mouse())
+                {
+                    self.ui.handle_event(event);
+                }
+                true
+            },
+            WinEvent::ScaleFactorChanged(scale_factor) => {
+                self.ui.scale_factor_changed(scale_factor);
+                false
+            },
+            WinEvent::InputUpdate(GameInput::ToggleInterface, true) if !self.typing() => {
+                self.show.toggle_ui();
+                true
+            },
+            WinEvent::InputUpdate(GameInput::ToggleCursor, true) if !self.typing() => {
+                self.force_ungrab = !self.force_ungrab;
+                true
+            },
+            WinEvent::InputUpdate(GameInput::AcceptGroupInvite, true) if !self.typing() => {
+                if let Some(prompt_dialog) = &mut self.show.prompt_dialog {
+                    prompt_dialog.set_outcome_via_keypress(true);
+                    true
+                } else {
+                    false
+                }
+            },
+            WinEvent::InputUpdate(GameInput::DeclineGroupInvite, true) if !self.typing() => {
+                if let Some(prompt_dialog) = &mut self.show.prompt_dialog {
+                    prompt_dialog.set_outcome_via_keypress(false);
+                    true
+                } else {
+                    false
+                }
+            },
+
+            // If not showing the ui don't allow keys that change the ui state but do listen for
+            // hotbar keys
+            WinEvent::InputUpdate(key, state) if !self.show.ui => {
+                if let Some(slot) = try_hotbar_slot_from_input(key) {
+                    handle_slot(
+                        slot,
+                        state,
+                        &mut self.events,
+                        &mut self.slot_manager,
+                        &mut self.hotbar,
+                        client_inventory,
+                    );
+                    true
+                } else {
+                    false
+                }
+            },
+
+            WinEvent::Zoom(_) => !cursor_grabbed && !self.ui.no_widget_capturing_mouse(),
+
+            WinEvent::InputUpdate(GameInput::Chat, true) => {
+                self.ui.focus_widget(if self.typing() {
+                    None
+                } else {
+                    self.force_chat = true;
+                    Some(self.ids.chat)
+                });
+                true
+            },
+            WinEvent::InputUpdate(GameInput::Escape, true) => {
+                if self.typing() {
+                    self.ui.focus_widget(None);
+                    self.force_chat = false;
+                } else if self.show.trade {
+                    self.events.push(Event::TradeAction(TradeAction::Decline));
+                } else {
+                    // Close windows on esc
+                    if self.show.bag {
+                        self.slot_manager.idle();
+                    }
+                    self.show.toggle_windows(global_state);
+                    self.force_ungrab = false;
+                }
+                true
+            },
+
+            // Press key while not typing
+            // MenuInput
+            WinEvent::MenuInput(key, state) => {
+                if self.typing() {
+                    // Close an opened chat using MenuInputs
+                    if key == MenuInput::Back {
+                        self.ui.focus_widget(None);
+                        self.force_chat = false;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    // Pass MenuInputs along to the UI
+                    if state {
+                        self.menu_events.push(key);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            },
+
+            // GameInput
+            WinEvent::InputUpdate(key, state) if !self.typing() => {
+                let gs_audio = &global_state.settings.audio;
+                let mut toggle_mute = |audio: Audio| {
+                    self.events
+                        .push(Event::SettingsChange(SettingsChange::Audio(audio)));
+                    true
+                };
+
+                match key {
+                    GameInput::Command if state => {
+                        self.force_chat_input = Some("/".to_owned());
+                        self.force_chat_cursor = Some(Index { line: 0, char: 1 });
+                        self.force_chat = true;
+                        self.ui.focus_widget(Some(self.ids.chat));
+                        true
+                    },
+                    GameInput::Map if state => {
+                        global_state.profile.tutorial.event_open_map();
+                        self.show.toggle_map();
+                        true
+                    },
+                    GameInput::Inventory if state => {
+                        global_state.profile.tutorial.event_open_inventory();
+                        let state = !self.show.bag;
+                        Self::show_bag(&mut self.slot_manager, &mut self.show, state);
+                        true
+                    },
+                    GameInput::Social if state => {
+                        self.show.toggle_social();
+                        true
+                    },
+                    GameInput::Crafting if state => {
+                        global_state.profile.tutorial.event_open_crafting();
+                        self.show.toggle_crafting();
+                        true
+                    },
+                    GameInput::Diary if state => {
+                        global_state.profile.tutorial.event_open_diary();
+                        self.show.toggle_diary();
+                        true
+                    },
+                    GameInput::Settings if state => {
+                        self.show.toggle_settings(global_state);
+                        true
+                    },
+                    GameInput::Controls if state => {
+                        self.show.toggle_settings(global_state);
+                        self.show.settings_tab = SettingsTab::Controls;
+                        true
+                    },
+                    GameInput::ToggleDebug if state => {
+                        global_state.settings.interface.toggle_debug =
+                            !global_state.settings.interface.toggle_debug;
+                        true
+                    },
+                    #[cfg(feature = "egui-ui")]
+                    GameInput::ToggleEguiDebug if state => {
+                        global_state.settings.interface.toggle_egui_debug =
+                            !global_state.settings.interface.toggle_egui_debug;
+                        true
+                    },
+                    GameInput::ToggleChat if state => {
+                        global_state.settings.interface.toggle_chat =
+                            !global_state.settings.interface.toggle_chat;
+                        true
+                    },
+                    GameInput::ToggleIngameUi if state => {
+                        self.show.ingame = !self.show.ingame;
+                        true
+                    },
+                    GameInput::MapZoomIn if state => {
+                        handle_map_zoom(2.0, self.world_map.1, &self.show, global_state)
+                    },
+                    GameInput::MapZoomOut if state => {
+                        handle_map_zoom(0.5, self.world_map.1, &self.show, global_state)
+                    },
+                    GameInput::MuteMaster if state => {
+                        toggle_mute(Audio::MuteMasterVolume(!gs_audio.master_volume.muted))
+                    },
+                    GameInput::MuteInactiveMaster if state => {
+                        toggle_mute(Audio::MuteInactiveMasterVolume(
+                            !gs_audio.inactive_master_volume_perc.muted,
+                        ))
+                    },
+                    GameInput::MuteMusic if state => {
+                        toggle_mute(Audio::MuteMusicVolume(!gs_audio.music_volume.muted))
+                    },
+                    GameInput::MuteSfx if state => {
+                        toggle_mute(Audio::MuteSfxVolume(!gs_audio.sfx_volume.muted))
+                    },
+                    GameInput::MuteAmbience if state => {
+                        toggle_mute(Audio::MuteAmbienceVolume(!gs_audio.ambience_volume.muted))
+                    },
+                    GameInput::Interact if state => {
+                        // Send ACKs during conversation
+                        if let Some((sender, _, dialogue)) = &self.current_dialogue
+                            && let rtsim::DialogueKind::Statement { tag, .. } = dialogue.kind
+                        {
+                            self.events.push(Event::Dialogue(*sender, rtsim::Dialogue {
+                                id: dialogue.id,
+                                kind: rtsim::DialogueKind::Ack { tag },
+                            }));
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                    GameInput::CurrentSlot => {
+                        let current_slot = self.hotbar.currently_selected_slot;
+                        handle_slot(
+                            current_slot,
+                            state,
+                            &mut self.events,
+                            &mut self.slot_manager,
+                            &mut self.hotbar,
+                            client_inventory,
+                        );
+                        true
+                    },
+                    GameInput::NextSlot if state => {
+                        self.hotbar.currently_selected_slot.next_slot();
+                        true
+                    },
+                    GameInput::PreviousSlot if state => {
+                        self.hotbar.currently_selected_slot.previous_slot();
+                        true
+                    },
+                    // Skillbar
+                    input => {
+                        if let Some(slot) = try_hotbar_slot_from_input(input) {
+                            handle_slot(
+                                slot,
+                                state,
+                                &mut self.events,
+                                &mut self.slot_manager,
+                                &mut self.hotbar,
+                                client_inventory,
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                }
+            },
+            // Else the player is typing in chat
+            WinEvent::InputUpdate(_key, _) => self.typing(),
+            WinEvent::Focused(state) => {
+                self.force_ungrab = !state;
+                true
+            },
+            WinEvent::Moved(_) => {
+                // Prevent the cursor from being grabbed while the window is being moved as this
+                // causes the window to move erratically
+                // TODO: this creates an issue where if you move the window then you need to
+                // close a menu to re-grab the mouse (and if one isn't already
+                // open you need to open and close a menu)
+                self.show.want_grab = false;
+                true
+            },
+            _ => false,
+        };
+        // Handle cursor grab.
+        global_state
+            .window
+            .grab_cursor(!self.force_ungrab && self.show.want_grab);
+
+        handled
+    }
+
+    pub fn maintain(
+        &mut self,
+        client: &Client,
+        global_state: &mut GlobalState,
+        debug_info: &Option<DebugInfo>,
+        camera: &Camera,
+        dt: Duration,
+        info: HudInfo,
+        interactable_map: (
+            HashMap<specs::Entity, Vec<interactable::EntityInteraction>>,
+            HashMap<VolumePos, (Block, Vec<&interactable::BlockInteraction>)>,
+        ),
+    ) -> Vec<Event> {
+        span!(_guard, "maintain", "Hud::maintain");
+
+        // Remove extra map markers that we've wandered a long distance away from
+        if let Some(pos) = client.position() {
+            self.extra_markers.retain(|em| {
+                const EXTRA_DISTANCE: f32 = 100.0;
+                em.marker.wpos.distance(pos.xy())
+                    < em.recv_pos.distance(em.marker.wpos) + EXTRA_DISTANCE
+            });
+        }
+
+        // conrod eats tabs. Un-eat a tabstop so tab completion can work
+        if self.ui.ui.global_input().events().any(|event| {
+            use conrod_core::{event, input};
+            matches!(
+                event,
+                /* event::Event::Raw(event::Input::Press(input::Button::Keyboard(input::Key::
+                 * Tab))) | */
+                event::Event::Ui(event::Ui::Press(_, event::Press {
+                    button: event::Button::Keyboard(input::Key::Tab),
+                    ..
+                },))
+            )
+        }) {
+            self.ui
+                .ui
+                .handle_event(conrod_core::event::Input::Text("\t".to_string()));
+        }
+
+        // Stop selecting a sprite to perform crafting with when out of range or sprite
+        // has been removed
+        self.show.crafting_fields.craft_sprite =
+            self.show
+                .crafting_fields
+                .craft_sprite
+                .filter(|(pos, sprite)| {
+                    self.show.crafting
+                        && if let Some(player_pos) = client.position() {
+                            pos.get_block_and_transform(
+                                &client.state().terrain(),
+                                &client.state().ecs().read_resource(),
+                                |e| {
+                                    client
+                                        .state()
+                                        .read_storage::<vcomp::Interpolated>()
+                                        .get(e)
+                                        .map(|interpolated| {
+                                            (comp::Pos(interpolated.pos), interpolated.ori)
+                                        })
+                                },
+                                &client.state().read_storage(),
+                            )
+                            .is_some_and(|(mat, block)| {
+                                block.get_sprite() == Some(*sprite)
+                                    && mat.mul_point(Vec3::broadcast(0.5)).distance(player_pos)
+                                        < MAX_PICKUP_RANGE
+                            })
+                        } else {
+                            false
+                        }
+                });
+
+        // Optimization: skip maintaining UI when it's off.
+        if !self.show.ui {
+            return std::mem::take(&mut self.events);
+        }
+
+        if let Some(maybe_id) = self.to_focus.take() {
+            self.ui.focus_widget(maybe_id);
+        }
+        let events = self.update_layout(
+            client,
+            global_state,
+            debug_info,
+            dt,
+            info,
+            camera,
+            interactable_map,
+        );
+        let camera::Dependents {
+            view_mat, proj_mat, ..
+        } = camera.dependents();
+        let focus_off = camera.get_focus_pos().map(f32::trunc);
+
+        // Check if item images need to be reloaded
+        self.item_imgs.reload_if_changed(&mut self.ui);
+        // TODO: using a thread pool in the obvious way for speeding up map zoom results
+        // in flickering artifacts, figure out a better way to make use of the
+        // thread pool
+        let _pool = client.state().ecs().read_resource::<SlowJobPool>();
+        self.ui.maintain(
+            global_state.window.renderer_mut(),
+            None,
+            //Some(&pool),
+            Some(proj_mat * view_mat * Mat4::translation_3d(-focus_off)),
+        );
+
+        events
+    }
+
+    #[inline]
+    pub fn clear_cursor(&mut self) { self.slot_manager.idle(); }
+
+    pub fn render<'a>(&'a self, drawer: &mut UiDrawer<'_, 'a>) {
+        span!(_guard, "render", "Hud::render");
+        // Don't show anything if the UI is toggled off.
+        if self.show.ui {
+            self.ui.render(drawer);
+        }
+    }
+
+    pub fn free_look(&mut self, free_look: bool) { self.show.free_look = free_look; }
+
+    pub fn auto_walk(&mut self, auto_walk: bool) { self.show.auto_walk = auto_walk; }
+
+    pub fn camera_clamp(&mut self, camera_clamp: bool) { self.show.camera_clamp = camera_clamp; }
+
+    /// Remind the player camera zoom is currently locked, for example if they
+    /// are trying to zoom.
+    pub fn zoom_lock_reminder(&mut self) {
+        if self.show.zoom_lock.reason.is_none() {
+            self.show.zoom_lock = ChangeNotification::from_reason(NotificationReason::Remind);
+        }
+    }
+
+    /// Start showing a temporary notification ([ChangeNotification]) that zoom
+    /// lock was toggled on/off.
+    pub fn zoom_lock_toggle(&mut self, state: bool) {
+        self.show.zoom_lock = ChangeNotification::from_state(state);
+    }
+
+    pub fn show_content_bubble(&mut self, pos: Vec3<f32>, content: comp::Content) {
+        self.content_bubbles.push((
+            pos,
+            comp::SpeechBubble::new(content, comp::SpeechBubbleType::None),
+        ));
+    }
+
+    pub fn handle_outcome(
+        &mut self,
+        outcome: &Outcome,
+        scene_data: &SceneData,
+        global_state: &GlobalState,
+    ) {
+        let client = scene_data.client;
+        let interface = &global_state.settings.interface;
+        match outcome {
+            Outcome::ExpChange { uid, exp, xp_pools } => {
+                let ecs = client.state().ecs();
+                let uids = ecs.read_storage::<Uid>();
+                let me = scene_data.viewpoint_entity;
+
+                if uids.get(me).is_some_and(|me| *me == *uid) {
+                    match self.floaters.exp_floaters.last_mut() {
+                        Some(floater)
+                            if floater.timer
+                                > (EXP_FLOATER_LIFETIME - EXP_ACCUMULATION_DURATION)
+                                && global_state.settings.interface.accum_experience
+                                && floater.owner == *uid =>
+                        {
+                            floater.jump_timer = 0.0;
+                            floater.exp_change += *exp;
+                        },
+                        _ => self.floaters.exp_floaters.push(ExpFloater {
+                            // Store the owner as to not accumulate old experience floaters
+                            owner: *uid,
+                            exp_change: *exp,
+                            timer: EXP_FLOATER_LIFETIME,
+                            jump_timer: 0.0,
+                            rand_offset: rand::rng().random::<(f32, f32)>(),
+                            xp_pools: xp_pools.clone(),
+                        }),
+                    }
+                }
+            },
+            Outcome::SkillPointGain {
+                uid,
+                skill_tree,
+                total_points,
+                ..
+            } => {
+                let ecs = client.state().ecs();
+                let uids = ecs.read_storage::<Uid>();
+                let me = scene_data.viewpoint_entity;
+
+                if uids.get(me).is_some_and(|me| *me == *uid) {
+                    self.floaters.skill_point_displays.push(SkillPointGain {
+                        skill_tree: *skill_tree,
+                        total_points: *total_points,
+                        timer: 5.0,
+                    });
+                }
+            },
+            Outcome::ComboChange { uid, combo } => {
+                let ecs = client.state().ecs();
+                let uids = ecs.read_storage::<Uid>();
+                let me = scene_data.viewpoint_entity;
+
+                if uids.get(me).is_some_and(|me| *me == *uid) {
+                    self.floaters.combo_floater = Some(ComboFloater {
+                        combo: *combo,
+                        timer: comp::combo::COMBO_DECAY_START,
+                    });
+                }
+            },
+            Outcome::Block { uid, parry, .. } if *parry => {
+                let ecs = client.state().ecs();
+                let uids = ecs.read_storage::<Uid>();
+                let me = scene_data.viewpoint_entity;
+
+                if uids.get(me).is_some_and(|me| *me == *uid) {
+                    self.floaters
+                        .block_floaters
+                        .push(BlockFloater { timer: 1.0 });
+                }
+            },
+            Outcome::HealthChange { info, .. } => {
+                let ecs = client.state().ecs();
+                let mut hp_floater_lists = ecs.write_storage::<HpFloaterList>();
+                let uids = ecs.read_storage::<Uid>();
+                let me = scene_data.viewpoint_entity;
+                let my_uid = uids.get(me);
+
+                if let Some(entity) = ecs.entity_from_uid(info.target)
+                    && let Some(floater_list) = hp_floater_lists.get_mut(entity)
+                {
+                    let hit_me = my_uid.is_some_and(|&uid| {
+                        (info.target == uid) && global_state.settings.interface.sct_inc_dmg
+                    });
+                    if match info.by {
+                        Some(by) => {
+                            let by_me = my_uid.is_some_and(|&uid| by.uid() == uid);
+                            // If the attack was by me also reset this timer
+                            if by_me {
+                                floater_list.time_since_last_dmg_by_me = Some(0.0);
+                            }
+                            hit_me || by_me
+                        },
+                        None => hit_me,
+                    } {
+                        // Group up damage from the same tick and instance number
+                        for floater in floater_list.floaters.iter_mut().rev() {
+                            if floater.timer > 0.0 {
+                                break;
+                            }
+                            if floater.info.instance == info.instance
+                                    // Group up precision hits and regular attacks for incoming damage
+                                    && (hit_me
+                                        || floater.info.precise
+                                            == info.precise)
+                            {
+                                floater.info.amount += info.amount;
+                                if info.precise {
+                                    floater.info.precise = info.precise
+                                }
+                                return;
+                            }
+                        }
+
+                        // To separate healing and damage floaters alongside the precise and
+                        // non-precise ones
+                        let last_floater = if !info.precise || hit_me {
+                            floater_list.floaters.iter_mut().rev().find(|f| {
+                                (if info.amount < 0.0 {
+                                        f.info.amount < 0.0
+                                    } else {
+                                        f.info.amount > 0.0
+                                    }) && f.timer
+                                        < if hit_me {
+                                            interface.sct_inc_dmg_accum_duration
+                                        } else {
+                                            interface.sct_dmg_accum_duration
+                                        }
+                                    // Ignore precise floaters, unless the damage is incoming
+                                    && (hit_me || !f.info.precise)
+                            })
+                        } else {
+                            None
+                        };
+
+                        match last_floater {
+                            Some(f) => {
+                                f.jump_timer = 0.0;
+                                f.info.amount += info.amount;
+                                f.info.precise = info.precise;
+                            },
+                            _ => {
+                                floater_list.floaters.push(HpFloater {
+                                    timer: 0.0,
+                                    jump_timer: 0.0,
+                                    info: *info,
+                                    rand: rand::random(),
+                                });
+                            },
+                        }
+                    }
+                }
+            },
+
+            _ => {},
+        }
+    }
+}
+// Get item qualities of equipped items and assign a tooltip title/frame color
+pub fn get_quality_col(quality: Quality) -> Color {
+    match quality {
+        Quality::Low => QUALITY_LOW,
+        Quality::Common => QUALITY_COMMON,
+        Quality::Moderate => QUALITY_MODERATE,
+        Quality::High => QUALITY_HIGH,
+        Quality::Epic => QUALITY_EPIC,
+        Quality::Legendary => QUALITY_LEGENDARY,
+        Quality::Artifact => QUALITY_ARTIFACT,
+        Quality::Debug => QUALITY_DEBUG,
+    }
+}
+
+fn try_hotbar_slot_from_input(input: GameInput) -> Option<hotbar::Slot> {
+    Some(match input {
+        GameInput::Slot1 => hotbar::Slot::One,
+        GameInput::Slot2 => hotbar::Slot::Two,
+        GameInput::Slot3 => hotbar::Slot::Three,
+        GameInput::Slot4 => hotbar::Slot::Four,
+        GameInput::Slot5 => hotbar::Slot::Five,
+        GameInput::Slot6 => hotbar::Slot::Six,
+        GameInput::Slot7 => hotbar::Slot::Seven,
+        GameInput::Slot8 => hotbar::Slot::Eight,
+        GameInput::Slot9 => hotbar::Slot::Nine,
+        GameInput::Slot10 => hotbar::Slot::Ten,
+        _ => return None,
+    })
+}
+
+pub fn cr_color(combat_rating: f32) -> Color {
+    let common = 2.0;
+    let moderate = 3.5;
+    let high = 6.5;
+    let epic = 8.5;
+    let legendary = 10.4;
+    let artifact = 122.0;
+    let debug = 200.0;
+
+    match combat_rating {
+        x if (0.0..common).contains(&x) => QUALITY_LOW,
+        x if (common..moderate).contains(&x) => QUALITY_COMMON,
+        x if (moderate..high).contains(&x) => QUALITY_MODERATE,
+        x if (high..epic).contains(&x) => QUALITY_HIGH,
+        x if (epic..legendary).contains(&x) => QUALITY_EPIC,
+        x if (legendary..artifact).contains(&x) => QUALITY_LEGENDARY,
+        x if (artifact..debug).contains(&x) => QUALITY_ARTIFACT,
+        x if x >= debug => QUALITY_DEBUG,
+        _ => XP_COLOR,
+    }
+}
+
+pub fn get_buff_image(buff: BuffKind, imgs: &Imgs) -> conrod_core::image::Id {
+    match buff {
+        // Buffs
+        BuffKind::Regeneration => imgs.buff_plus_0,
+        BuffKind::Saturation => imgs.buff_saturation_0,
+        BuffKind::Potion => imgs.buff_potion_0,
+        // TODO: Need unique image for Agility (uses same as Hastened atm)
+        BuffKind::Agility => imgs.buff_haste_0,
+        BuffKind::RestingHeal => imgs.buff_resting_heal_0,
+        BuffKind::EnergyRegen => imgs.buff_energyplus_0,
+        BuffKind::ComboGeneration => imgs.buff_fury,
+        BuffKind::IncreaseMaxEnergy => imgs.buff_energyplus_0,
+        BuffKind::IncreaseMaxHealth => imgs.buff_healthplus_0,
+        BuffKind::Invulnerability => imgs.buff_invincibility_0,
+        BuffKind::ProtectingWard => imgs.buff_dmg_red_0,
+        BuffKind::Frenzied => imgs.buff_frenzy_0,
+        BuffKind::Hastened => imgs.buff_haste_0,
+        BuffKind::Fortitude => imgs.buff_fortitude_0,
+        BuffKind::Reckless => imgs.buff_reckless,
+        BuffKind::Flame => imgs.buff_flame,
+        BuffKind::Frigid => imgs.buff_frigid,
+        BuffKind::Lifesteal => imgs.buff_lifesteal,
+        BuffKind::Resilience => imgs.buff_resilience,
+        // TODO: Get image
+        // BuffKind::SalamanderAspect => imgs.debuff_burning_0,
+        BuffKind::ImminentCritical => imgs.buff_imminentcritical,
+        BuffKind::Fury => imgs.buff_fury,
+        BuffKind::Sunderer => imgs.buff_sunderer,
+        BuffKind::Defiance => imgs.buff_defiance,
+        BuffKind::Bloodfeast => imgs.buff_plus_0,
+        BuffKind::Berserk => imgs.buff_reckless,
+        BuffKind::ScornfulTaunt => imgs.buff_scornfultaunt,
+        BuffKind::Tenacity => imgs.buff_tenacity,
+        BuffKind::StormChaser => imgs.buff_stormchaser,
+        BuffKind::EagleEye => imgs.buff_eagleeye,
+        BuffKind::ArdentHunt => imgs.buff_ardenthunt,
+        BuffKind::IgniteArrow => imgs.bow_ignite_arrow,
+        BuffKind::FreezeArrow => imgs.bow_freeze_arrow,
+        BuffKind::DrenchArrow => imgs.bow_drench_arrow,
+        BuffKind::JoltArrow => imgs.bow_jolt_arrow,
+        //  Debuffs
+        BuffKind::Bleeding => imgs.debuff_bleed_0,
+        BuffKind::Cursed => imgs.debuff_cursed_0,
+        BuffKind::Burning => imgs.debuff_burning_0,
+        BuffKind::Crippled => imgs.debuff_crippled_0,
+        BuffKind::Frozen => imgs.debuff_frozen_0,
+        BuffKind::Wet => imgs.debuff_wet_0,
+        BuffKind::Ensnared => imgs.debuff_ensnared_0,
+        BuffKind::Poisoned => imgs.debuff_poisoned_0,
+        BuffKind::Parried => imgs.debuff_parried_0,
+        BuffKind::PotionSickness => imgs.debuff_potionsickness_0,
+        BuffKind::Polymorphed => imgs.debuff_polymorphed_0,
+        BuffKind::Heatstroke => imgs.debuff_heatstroke_0,
+        BuffKind::Rooted => imgs.debuff_rooted_0,
+        BuffKind::Winded => imgs.debuff_winded_0,
+        BuffKind::Amnesia => imgs.debuff_amnesia_0,
+        BuffKind::OffBalance => imgs.debuff_offbalance_0,
+        BuffKind::Chilled => imgs.debuff_chilled,
+    }
+}
+
+pub fn get_sprite_desc(
+    sprite: SpriteKind,
+    localized_strings: &Localization,
+) -> Option<Cow<'_, str>> {
+    let i18n_key = match sprite {
+        SpriteKind::Empty | SpriteKind::GlassBarrier => return None,
+        SpriteKind::Anvil => "hud-crafting-anvil",
+        SpriteKind::Cauldron => "hud-crafting-cauldron",
+        SpriteKind::CookingPot => "hud-crafting-cooking_pot",
+        SpriteKind::RepairBench => "hud-crafting-repair_bench",
+        SpriteKind::CraftingBench => "hud-crafting-crafting_bench",
+        SpriteKind::Forge => "hud-crafting-forge",
+        SpriteKind::Loom => "hud-crafting-loom",
+        SpriteKind::SpinningWheel => "hud-crafting-spinning_wheel",
+        SpriteKind::TanningRack => "hud-crafting-tanning_rack",
+        SpriteKind::DismantlingBench => "hud-crafting-salvaging_station",
+        SpriteKind::ChestBuried
+        | SpriteKind::Chest
+        | SpriteKind::CommonLockedChest
+        | SpriteKind::CoralChest
+        | SpriteKind::DungeonChest0
+        | SpriteKind::DungeonChest1
+        | SpriteKind::DungeonChest2
+        | SpriteKind::DungeonChest3
+        | SpriteKind::DungeonChest4
+        | SpriteKind::DungeonChest5
+        | SpriteKind::SahaginChest
+        | SpriteKind::TerracottaChest => "common-sprite-chest",
+        SpriteKind::Mud => "common-sprite-mud",
+        SpriteKind::Grave => "common-sprite-grave",
+        SpriteKind::Crate => "common-sprite-crate",
+        _ => return None,
+    };
+    Some(localized_strings.get_msg(i18n_key))
+}
+
+pub fn angle_of_attack_text(
+    fluid: Option<comp::Fluid>,
+    velocity: Option<comp::Vel>,
+    character_state: Option<&comp::CharacterState>,
+) -> String {
+    use comp::CharacterState;
+
+    let glider_ori = if let Some(CharacterState::Glide(data)) = character_state {
+        data.ori
+    } else {
+        return "Angle of Attack: Not gliding".to_owned();
+    };
+
+    let fluid = if let Some(fluid) = fluid {
+        fluid
+    } else {
+        return "Angle of Attack: Not in fluid".to_owned();
+    };
+
+    let velocity = if let Some(velocity) = velocity {
+        velocity
+    } else {
+        return "Angle of Attack: Player has no vel component".to_owned();
+    };
+    let rel_flow = fluid.relative_flow(&velocity).0;
+    let v_sq = rel_flow.magnitude_squared();
+
+    if v_sq.abs() > 0.0001 {
+        let rel_flow_dir = Dir::new(rel_flow / v_sq.sqrt());
+        let aoe = fluid_dynamics::angle_of_attack(&glider_ori, &rel_flow_dir);
+        let (rel_x, rel_y, rel_z) = (rel_flow.x, rel_flow.y, rel_flow.z);
+        format!(
+            "Angle of Attack: {:.1} ({:.1},{:.1},{:.1})",
+            aoe.to_degrees(),
+            rel_x,
+            rel_y,
+            rel_z
+        )
+    } else {
+        "Angle of Attack: Not moving".to_owned()
+    }
+}
+
+fn air_velocity(fluid: Option<comp::Fluid>) -> String {
+    if let Some(comp::Fluid::Air { vel: air_vel, .. }) = fluid {
+        format!(
+            "Air Velocity: ({:.1}, {:.1}, {:.1})",
+            air_vel.0.x, air_vel.0.y, air_vel.0.z
+        )
+    } else {
+        "Air Velocity: Not in Air".to_owned()
+    }
+}
+
+/// Converts multiplier to percentage.
+/// NOTE: floats are not the most precise type.
+///
+/// # Examples
+/// ```
+/// use veloren_voxygen::hud::multiplier_to_percentage;
+///
+/// let positive = multiplier_to_percentage(1.05);
+/// assert!((positive - 5.0).abs() < 0.0001);
+/// let negative = multiplier_to_percentage(0.85);
+/// assert!((negative - (-15.0)).abs() < 0.0001);
+/// ```
+pub fn multiplier_to_percentage(value: f32) -> f32 { value * 100.0 - 100.0 }

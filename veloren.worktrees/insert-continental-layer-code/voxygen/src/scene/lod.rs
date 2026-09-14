@@ -1,0 +1,412 @@
+use crate::{
+    render::{
+        CullingMode, FirstPassDrawer, Instances, LodObjectInstance, LodObjectVertex,
+        LodTerrainVertex, Mesh, Model, Quad, Renderer, Tri,
+        pipelines::lod_terrain::{LodData, Vertex},
+    },
+    scene::{Camera, camera},
+    settings::Settings,
+};
+use client::Client;
+use common::{
+    assets::{AssetExt, Obj},
+    lod,
+    spiral::Spiral2d,
+    util::{srgb_to_linear, srgba_to_linear},
+    weather,
+};
+use hashbrown::HashMap;
+use std::ops::Range;
+use treeculler::{AABB, BVol, Frustum};
+use vek::*;
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct VertexFlags: u8 {
+        /// Use instance not vertex colour
+        const INST_COLOR    = 0b00000001;
+        /// Glow!
+        const GLOW          = 0b00000010;
+    }
+}
+
+struct ObjectGroup {
+    instances: Instances<LodObjectInstance>,
+    bounds: Option<Aabb<f32>>,
+    frustum_last_plane_index: u8,
+    visible: bool,
+}
+
+pub struct Lod {
+    model: Option<(u32, Model<LodTerrainVertex>)>,
+    data: LodData,
+
+    zone_objects: HashMap<Vec2<i32>, HashMap<lod::ObjectKind, ObjectGroup>>,
+    // (model, radius, height)
+    object_data: HashMap<lod::ObjectKind, (Model<LodObjectVertex>, f32, Range<f32>)>,
+}
+
+// TODO: Make constant when possible.
+pub fn water_color() -> Rgba<f32> {
+    /* Rgba::new(0.2, 0.5, 1.0, 0.0) */
+    srgba_to_linear(Rgba::new(0.0, 0.25, 0.5, 0.0))
+}
+
+impl Lod {
+    pub fn new(renderer: &mut Renderer, client: &Client, settings: &Settings) -> Self {
+        let data = LodData::new(
+            renderer,
+            client.world_data().chunk_size().as_(),
+            client.world_data().lod_base.raw(),
+            client.world_data().lod_alt.raw(),
+            client.world_data().lod_horizon.raw(),
+            (client.world_data().chunk_size().as_() / weather::CHUNKS_PER_CELL).map(|e| e.max(1)),
+            settings.graphics.lod_detail.clamp(100, 2500),
+            /* TODO: figure out how we want to do this without color borders?
+             * water_color().into_array().into(), */
+        );
+        Self {
+            model: None,
+            data,
+            zone_objects: HashMap::new(),
+            object_data: [
+                (
+                    lod::ObjectKind::GenericTree,
+                    make_lod_object("oak", renderer),
+                ),
+                (lod::ObjectKind::Pine, make_lod_object("pine", renderer)),
+                (lod::ObjectKind::Dead, make_lod_object("dead", renderer)),
+                (lod::ObjectKind::House, make_lod_object("house", renderer)),
+                (
+                    lod::ObjectKind::GiantTree,
+                    make_lod_object("giant_tree", renderer),
+                ),
+                (
+                    lod::ObjectKind::Mangrove,
+                    make_lod_object("mangrove", renderer),
+                ),
+                (lod::ObjectKind::Acacia, make_lod_object("acacia", renderer)),
+                (lod::ObjectKind::Birch, make_lod_object("birch", renderer)),
+                (
+                    lod::ObjectKind::Redwood,
+                    make_lod_object("redwood", renderer),
+                ),
+                (lod::ObjectKind::Baobab, make_lod_object("baobab", renderer)),
+                (
+                    lod::ObjectKind::Frostpine,
+                    make_lod_object("frostpine", renderer),
+                ),
+                (lod::ObjectKind::Haniwa, make_lod_object("haniwa", renderer)),
+                (
+                    lod::ObjectKind::Desert,
+                    make_lod_object("desert_houses", renderer),
+                ),
+                (lod::ObjectKind::Palm, make_lod_object("palm", renderer)),
+                (lod::ObjectKind::Arena, make_lod_object("arena", renderer)),
+                (
+                    lod::ObjectKind::SavannahHut,
+                    make_lod_object("savannah_hut", renderer),
+                ),
+                (
+                    lod::ObjectKind::SavannahAirshipDock,
+                    make_lod_object("savannah_airship_dock", renderer),
+                ),
+                (
+                    lod::ObjectKind::TerracottaPalace,
+                    make_lod_object("terracotta_palace", renderer),
+                ),
+                (
+                    lod::ObjectKind::TerracottaHouse,
+                    make_lod_object("terracotta_house", renderer),
+                ),
+                (
+                    lod::ObjectKind::TerracottaYard,
+                    make_lod_object("terracotta_yard", renderer),
+                ),
+                (
+                    lod::ObjectKind::AirshipDock,
+                    make_lod_object("airship_dock", renderer),
+                ),
+                (
+                    lod::ObjectKind::CoastalHouse,
+                    make_lod_object("coastal_house", renderer),
+                ),
+                (
+                    lod::ObjectKind::CoastalWorkshop,
+                    make_lod_object("coastal_workshop", renderer),
+                ),
+                (
+                    lod::ObjectKind::CoastalAirshipDock,
+                    make_lod_object("coastal_airship_dock", renderer),
+                ),
+                (
+                    lod::ObjectKind::DesertCityAirshipDock,
+                    make_lod_object("desert_city_airship_dock", renderer),
+                ),
+                (
+                    lod::ObjectKind::CliffTownAirshipDock,
+                    make_lod_object("cliff_town_airship_dock", renderer),
+                ),
+            ]
+            .into(),
+        }
+    }
+
+    pub fn get_data(&self) -> &LodData { &self.data }
+
+    pub fn set_detail(&mut self, detail: u32) {
+        // Make sure the recorded detail is even.
+        self.data.tgt_detail = (detail - detail % 2).clamp(100, 500);
+    }
+
+    pub fn maintain(
+        &mut self,
+        renderer: &mut Renderer,
+        client: &Client,
+        focus_pos: Vec3<f32>,
+        camera: &Camera,
+    ) {
+        // Update LoD terrain mesh according to detail
+        if self
+            .model
+            .as_ref()
+            .map(|(detail, _)| *detail != self.data.tgt_detail)
+            .unwrap_or(true)
+        {
+            self.model = Some((
+                self.data.tgt_detail,
+                renderer
+                    .create_model(&create_lod_terrain_mesh(self.data.tgt_detail))
+                    .unwrap(),
+            ));
+        }
+
+        // Create new LoD groups when a new zone has loaded
+        for (p, zone) in client.lod_zones() {
+            self.zone_objects.entry(*p).or_insert_with(|| {
+                let mut objects = HashMap::<_, Vec<_>>::new();
+                let mut bounds = None;
+                for object in zone.objects.iter() {
+                    let Some((_, radius, z_range)) = self.object_data.get(&object.kind) else {
+                        continue;
+                    };
+                    let pos = p.map(|e| lod::to_wpos(e) as f32).with_z(0.0)
+                        + object.pos.map(|e| e as f32)
+                        + Vec2::broadcast(0.5).with_z(0.0);
+                    let rad = Vec2::broadcast(*radius);
+                    let obj_bounds = Aabb {
+                        min: pos + (-rad).with_z(z_range.start),
+                        max: pos + rad.with_z(z_range.end),
+                    };
+                    bounds = Some(bounds.map_or(obj_bounds, |b: Aabb<f32>| b.union(obj_bounds)));
+                    objects
+                        .entry(object.kind)
+                        .or_default()
+                        .push(LodObjectInstance::new(pos, object.color, object.flags));
+                }
+                objects
+                    .into_iter()
+                    .map(|(kind, instances)| {
+                        (kind, ObjectGroup {
+                            instances: renderer.create_instances(&instances),
+                            bounds,
+                            frustum_last_plane_index: 0,
+                            visible: false,
+                        })
+                    })
+                    .collect()
+            });
+        }
+
+        // Remove zones that are unloaded
+        self.zone_objects
+            .retain(|p, _| client.lod_zones().contains_key(p));
+
+        // Determine visibility of zones based on view frustum
+        let camera::Dependents {
+            view_mat,
+            proj_mat_treeculler,
+            ..
+        } = camera.dependents();
+        let focus_off = focus_pos.map(|e| e.trunc());
+        let frustum = Frustum::from_modelview_projection(
+            (proj_mat_treeculler * view_mat * Mat4::translation_3d(-focus_off)).into_col_arrays(),
+        );
+        for groups in &mut self.zone_objects.values_mut() {
+            for group in groups.values_mut() {
+                if let Some(bounds) = &group.bounds {
+                    let (in_frustum, last_plane_index) =
+                        AABB::new(bounds.min.into_array(), bounds.max.into_array())
+                            .coherent_test_against_frustum(
+                                &frustum,
+                                group.frustum_last_plane_index,
+                            );
+                    group.visible = in_frustum;
+                    group.frustum_last_plane_index = last_plane_index;
+                }
+            }
+        }
+        // Update weather texture
+        // NOTE: consider moving the lerping to a shader if the overhead of uploading to
+        // the gpu each frame becomes an issue.
+        let weather = client.state().weather_grid();
+        let size = weather.size().as_::<u32>();
+        renderer.update_texture(
+            &self.data.weather,
+            [0, 0],
+            [size.x, size.y],
+            &weather
+                .iter()
+                .map(|(_, w)| [(w.cloud * 255.0) as u8, (w.rain * 255.0) as u8, 0, 0])
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    pub fn render<'a>(&'a self, drawer: &mut FirstPassDrawer<'a>, culling_mode: CullingMode) {
+        if let Some((_, model)) = self.model.as_ref() {
+            drawer.draw_lod_terrain(model);
+        }
+
+        if !matches!(culling_mode, CullingMode::Underground) {
+            // Draw LoD objects
+            let mut drawer = drawer.draw_lod_objects();
+            for groups in self.zone_objects.values() {
+                for (kind, group) in groups.iter().filter(|(_, g)| g.visible) {
+                    if let Some((model, _, _)) = self.object_data.get(kind) {
+                        drawer.draw(model, &group.instances);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn create_lod_terrain_mesh(detail: u32) -> Mesh<LodTerrainVertex> {
+    // detail is even, so we choose odd detail (detail + 1) to create two even
+    // halves with an empty hole.
+    let detail = detail + 1;
+    Spiral2d::new()
+        .take((detail * detail) as usize)
+        .skip(1)
+        .map(|pos| {
+            let x = pos.x + detail as i32 / 2;
+            let y = pos.y + detail as i32 / 2;
+
+            let transform = |x| (2.0 * x as f32) / detail as f32 - 1.0;
+
+            Quad::new(
+                Vertex::new(Vec2::new(x, y).map(transform)),
+                Vertex::new(Vec2::new(x + 1, y).map(transform)),
+                Vertex::new(Vec2::new(x + 1, y + 1).map(transform)),
+                Vertex::new(Vec2::new(x, y + 1).map(transform)),
+            )
+            .rotated_by(usize::from(
+                !((x > detail as i32 / 2) ^ (y > detail as i32 / 2)),
+            ))
+        })
+        .collect()
+}
+
+/// Create LoD objects from an .obj asset file.
+///
+/// Returns the model, the object radius, and the object height.
+///
+/// ### Object Colors
+///
+/// In the .obj LoD files, objects can have a specific color by setting the name
+/// of the object to the format "r_g_b" where the values are u8 integers. E.g.
+/// the line "o 1_0_0" would set the color of that object to red. Note that the
+/// leading 'o' is part of the Wavefront .obj file format (o means 'object').
+/// The object name follows the 'o'.
+///
+/// If the name of the object is 'InstCol', that means to use the instance
+/// color, i.e., the color from the worldgen lod::Object. The get_lod_zone()
+/// function creates lod::Object instances with a color field (usually black)
+/// that is the 'instance' color.  For example, City plots have houses
+/// with varying roof colors, and the house lod::Object that is the roof uses
+/// the instance color because it's name is set to InstCol.
+///
+/// These two choices, setting a specific color for an object by using the
+/// "r_g_b" format, or setting the name to 'InstCol' and using the instance
+/// color are mutually exclusive.
+///
+/// ### Glow
+///
+/// A glow effect can also be applied to the LoD object by using the "Glow" flag
+/// in the object name. If the name of an object includes 'Glow', the object
+/// will have a glowing effect. For example, the name 240_0_0_Glow would set the
+/// color to red and apply a glow effect. 'Glow' by itself means to apply a glow
+/// effect to the object using the default color seen below (127, 127, 127). The
+/// lod-object-frag shader applies a glow color that is tinted by the fragment
+/// surface color.
+///
+/// > **Note:** The keyword Glow is case-sensitive.
+///
+/// ### Backwards Compatibility
+///
+/// Previous versions of this function expected the object name to either be
+/// InstCol, Glow, or a color format. So, Glow, InstCol, and 255_0_0 were valid
+/// object names. This scheme continues to work, with the added functionality of
+/// being able to specify a color and the glow effect together.
+///
+/// ### Examples (without the leading "o"):
+///
+/// - `Glow` Apply a glow effect with the default glow color (light orange).
+/// - `255_0_0_Glow` The object will be a glowing red.
+/// - `255_255_0` The object will be yellow.
+/// - `This is an object` The object color will be the default light gray.
+/// - `The cone on top of the spire, uses Glow` The object will glow with a
+///   light orange color.
+/// - `InstCol` The object will use the instance color that is set in the
+///   worldgen lod::Object.
+/// - `InstCol Glow` The object will use the instance color. Glow is ignored.
+fn make_lod_object(
+    name: &str,
+    renderer: &mut Renderer,
+) -> (Model<LodObjectVertex>, f32, Range<f32>) {
+    let model = Obj::load_expect(&format!("voxygen.lod.{}", name));
+    let mut radius = 0.0f32;
+    let mut z_range = None;
+    let mut mesh = Mesh::new();
+    for (objname, obj) in model.read().0.objects() {
+        let mut color = objname.split('_').filter_map(|x| x.parse::<u8>().ok());
+        let color = color
+            .next()
+            .and_then(|r| Some(Rgb::new(r, color.next()?, color.next()?)))
+            .unwrap_or(Rgb::broadcast(127));
+        let color = srgb_to_linear(color.map(|c| c as f32 / 255.0));
+        let flags = if objname.contains("InstCol") && objname.contains("Glow") {
+            VertexFlags::INST_COLOR | VertexFlags::GLOW
+        } else if objname.contains("Glow") {
+            VertexFlags::GLOW
+        } else if objname.contains("InstCol") {
+            VertexFlags::INST_COLOR
+        } else {
+            VertexFlags::empty()
+        };
+
+        for vs in obj.triangles() {
+            for v in vs {
+                radius = radius.max(Vec3::from(v.position()).xy().magnitude());
+                let z = v.position()[2];
+                let z_range = z_range.get_or_insert(z..z);
+                z_range.start = z_range.start.min(z);
+                z_range.end = z_range.end.max(z);
+            }
+            let [a, b, c] = vs.map(|v| {
+                LodObjectVertex::new(
+                    v.position().into(),
+                    v.normal().unwrap_or([0.0, 0.0, 1.0]).into(),
+                    color,
+                    flags,
+                )
+            });
+            mesh.push_tri(Tri::new(a, b, c));
+        }
+    }
+    (
+        renderer.create_model(&mesh).expect("Mesh was empty!"),
+        radius,
+        z_range.expect("no vertices"),
+    )
+}
