@@ -1,4 +1,8 @@
-use crate::{client::Client, property::PropertyRuntime};
+use crate::{
+    client::Client,
+    property::PropertyRuntime,
+    vgld::{DepositVerifier, SolanaDepositVerifier, VgldConfig, VgldLedger, apply_verified_deposit},
+};
 use common::{
     comp::{ChatMode, ChatType, Content, Group, Player},
     event::{self, EmitExt},
@@ -9,6 +13,7 @@ use common::{
 use common_ecs::{Job, Origin, Phase, System};
 use common_net::msg::{ClientGeneral, PropertyPurchaseState, ServerGeneral};
 use specs::{Entities, Join, LendJoin, Read, ReadStorage, Write, WriteStorage};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, warn};
 
 event_emitters! {
@@ -29,6 +34,8 @@ impl Sys {
         client: &Client,
         player: Option<&Player>,
         property_runtime: &mut PropertyRuntime,
+        vgld_ledger: &mut VgldLedger,
+        vgld_config: &VgldConfig,
         uids: &ReadStorage<'_, Uid>,
         chat_modes: &ReadStorage<'_, ChatMode>,
         groups: &ReadStorage<'_, Group>,
@@ -52,6 +59,64 @@ impl Sys {
                 };
 
                 let player_id = player.uuid().to_string();
+                let reservation_price = property_runtime
+                    .reserve_purchase(&player_id, &parcel_id);
+                if let Ok(price) = reservation_price {
+                    if vgld_ledger.balance(&player_id) < price {
+                        property_runtime.release_purchase(&parcel_id);
+                        client.send(ServerGeneral::PropertyPurchaseResult {
+                            parcel_id,
+                            state: PropertyPurchaseState::Failed,
+                            message: "You do not have enough VGLD for this property.".to_string(),
+                        })?;
+                        return Ok(());
+                    }
+                    let test_mode = std::env::var("VELOREN_PROPERTY_VGLD_PURCHASE_TEST_MODE")
+                        .ok()
+                        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+                    if test_mode {
+                        let purchase_nonce = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos();
+                        let transaction_id =
+                            format!("property-purchase:{player_id}:{parcel_id}:{purchase_nonce}");
+                        if let Err(error) = vgld_ledger.debit(&player_id, price, &transaction_id) {
+                            property_runtime.release_purchase(&parcel_id);
+                            client.send(ServerGeneral::PropertyPurchaseResult {
+                                parcel_id,
+                                state: PropertyPurchaseState::Failed,
+                                message: format!("VGLD purchase debit failed: {error:?}"),
+                            })?;
+                            return Ok(());
+                        }
+                        if property_runtime.complete_sandbox_purchase(&player_id, &parcel_id) {
+                            client.send(ServerGeneral::PropertyPurchaseResult {
+                                parcel_id,
+                                state: PropertyPurchaseState::Owned,
+                                message: "Test-mode purchase complete. VGLD was debited from the server ledger; no blockchain transaction was created.".to_string(),
+                            })?;
+                            return Ok(());
+                        }
+                        let refund_id = format!("{transaction_id}:refund");
+                        if let Err(error) = vgld_ledger.credit(&player_id, price, &refund_id) {
+                            error!(?error, %player_id, %parcel_id, "Failed to refund unsuccessful property test purchase");
+                        }
+                        property_runtime.release_purchase(&parcel_id);
+                        client.send(ServerGeneral::PropertyPurchaseResult {
+                            parcel_id,
+                            state: PropertyPurchaseState::Failed,
+                            message: "Test-mode purchase could not assign the development land NFT; the VGLD debit was refunded.".to_string(),
+                        })?;
+                        return Ok(());
+                    }
+                    client.send(ServerGeneral::PropertyPurchaseResult {
+                        parcel_id,
+                        state: PropertyPurchaseState::Pending,
+                        message: "Property reserved. Blockchain settlement is not enabled on this server yet; no VGLD was debited.".to_string(),
+                    })?;
+                    return Ok(());
+                }
                 let parcel = property_runtime
                     .parcel_infos_for_player(&player_id)
                     .into_iter()
@@ -94,6 +159,86 @@ impl Sys {
                     parcel_id,
                     state,
                     message,
+                })?;
+            },
+            ClientGeneral::RequestVgldAccount => {
+                let Some(player) = player else {
+                    warn!(?entity, "VGLD account requested without player data");
+                    return Ok(());
+                };
+
+                let player_id = player.uuid().to_string();
+                let account = property_runtime.account(&player_id);
+                let wallet = account.as_ref().map(|account| account.wallet.clone());
+                let balance_base_units = account
+                    .as_ref()
+                    .map(|account| vgld_ledger.balance(&account.player_id))
+                    .unwrap_or_default();
+                let status = if wallet.is_some() {
+                    "Wallet linked".to_string()
+                } else {
+                    "Wallet not linked".to_string()
+                };
+                client.send(ServerGeneral::VgldAccount {
+                    wallet,
+                    balance_base_units,
+                    decimals: crate::vgld::VGLD_DECIMALS,
+                    status,
+                })?;
+            },
+            ClientGeneral::RequestVgldDeposit { transaction_id } => {
+                let Some(player) = player else {
+                    warn!(?entity, "VGLD deposit requested without player data");
+                    return Ok(());
+                };
+                let player_id = player.uuid().to_string();
+                let Some(account) = property_runtime.account(&player_id) else {
+                    client.send(ServerGeneral::VgldAccount {
+                        wallet: None,
+                        balance_base_units: 0,
+                        decimals: crate::vgld::VGLD_DECIMALS,
+                        status: "Link a wallet before depositing VGLD".to_string(),
+                    })?;
+                    return Ok(());
+                };
+                let Some(mint) = vgld_config.mint_address.as_deref() else {
+                    client.send(ServerGeneral::VgldAccount {
+                        wallet: Some(account.wallet),
+                        balance_base_units: vgld_ledger.balance(&account.player_id),
+                        decimals: crate::vgld::VGLD_DECIMALS,
+                        status: "VGLD deposits are not configured on this server".to_string(),
+                    })?;
+                    return Ok(());
+                };
+                let Some(treasury) = vgld_config.treasury_address.as_deref() else {
+                    client.send(ServerGeneral::VgldAccount {
+                        wallet: Some(account.wallet),
+                        balance_base_units: vgld_ledger.balance(&account.player_id),
+                        decimals: crate::vgld::VGLD_DECIMALS,
+                        status: "VGLD deposits are not configured on this server".to_string(),
+                    })?;
+                    return Ok(());
+                };
+                let verifier = SolanaDepositVerifier::new(&vgld_config.rpc_url);
+                let status = match verifier
+                    .verify_deposit(&transaction_id, &account.wallet, mint, Some(treasury))
+                    .and_then(|deposit| {
+                        apply_verified_deposit(
+                            vgld_ledger,
+                            &account.player_id,
+                            &account.wallet,
+                            mint,
+                            deposit,
+                        )
+                    }) {
+                    Ok(()) => "Deposit verified and credited".to_string(),
+                    Err(error) => format!("Deposit rejected: {error:?}"),
+                };
+                client.send(ServerGeneral::VgldAccount {
+                    wallet: Some(account.wallet),
+                    balance_base_units: vgld_ledger.balance(&account.player_id),
+                    decimals: crate::vgld::VGLD_DECIMALS,
+                    status,
                 })?;
             },
             ClientGeneral::RequestWalletChallenge => {
@@ -236,6 +381,8 @@ impl<'a> System<'a> for Sys {
         ReadStorage<'a, Group>,
         WriteStorage<'a, Client>,
         Write<'a, PropertyRuntime>,
+        Write<'a, VgldLedger>,
+        Read<'a, VgldConfig>,
     );
 
     const NAME: &'static str = "msg::general";
@@ -254,6 +401,8 @@ impl<'a> System<'a> for Sys {
             groups,
             mut clients,
             mut property_runtime,
+            mut vgld_ledger,
+            vgld_config,
         ): Self::SystemData,
     ) {
         let mut emitters = events.get_emitters();
@@ -266,6 +415,8 @@ impl<'a> System<'a> for Sys {
                     client,
                     player,
                     &mut property_runtime,
+                    &mut vgld_ledger,
+                    &vgld_config,
                     &uids,
                     &chat_modes,
                     &groups,

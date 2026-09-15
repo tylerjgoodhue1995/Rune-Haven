@@ -15,7 +15,7 @@ pub struct WorldPosition {
     pub y: i32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ParcelBounds {
     pub min_x: i32,
     pub min_y: i32,
@@ -23,12 +23,20 @@ pub struct ParcelBounds {
     pub max_y: i32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PropertyParcel {
     pub id: String,
     pub land_nft_id: String,
     pub world_id: String,
+    pub continent: String,
+    pub region: String,
     pub land_type: String,
+    pub rarity: String,
+    pub terrain_type: String,
+    pub water_access: bool,
+    pub road_access: bool,
+    pub price_vgld_base_units: u64,
+    pub protected: bool,
     pub bounds: ParcelBounds,
     pub allowed_buildings: Vec<String>,
     pub max_buildings: usize,
@@ -40,6 +48,14 @@ pub struct BuildingFootprint {
     pub height: i32,
     pub clearance: i32,
     pub capacity_cost: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedZone {
+    pub id: String,
+    pub world_id: String,
+    pub bounds: ParcelBounds,
+    pub reason: String,
 }
 
 impl BuildingFootprint {
@@ -128,10 +144,12 @@ pub enum PropertyError {
     LandMetadataMismatch,
     BuildingOwnershipMissing,
     ParcelNotFound,
+    ProtectedZone,
     BuildingTypeNotAllowed,
     BuildingPlacementOutOfBounds,
     BuildingPlacementConflict,
     ParcelFull,
+    PurchaseReserved,
     UnknownAsset,
     PersistenceFailed,
 }
@@ -148,6 +166,7 @@ impl std::fmt::Display for PropertyError {
             },
             Self::BuildingOwnershipMissing => write!(f, "building ownership was not verified"),
             Self::ParcelNotFound => write!(f, "parcel was not found"),
+            Self::ProtectedZone => write!(f, "this area is protected from player ownership"),
             Self::BuildingTypeNotAllowed => write!(f, "this building type is not allowed here"),
             Self::BuildingPlacementOutOfBounds => {
                 write!(f, "building placement is outside parcel bounds")
@@ -159,6 +178,7 @@ impl std::fmt::Display for PropertyError {
                 )
             },
             Self::ParcelFull => write!(f, "this parcel is full"),
+            Self::PurchaseReserved => write!(f, "this parcel is reserved for another purchase"),
             Self::UnknownAsset => write!(f, "asset metadata is missing or invalid"),
             Self::PersistenceFailed => write!(f, "failed to persist property placement"),
         }
@@ -677,6 +697,12 @@ pub struct PlayerWalletRegistry {
     linked_wallets: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalletAccount {
+    pub player_id: String,
+    pub wallet: String,
+}
+
 impl PlayerWalletRegistry {
     pub fn new() -> Self {
         Self {
@@ -759,6 +785,19 @@ impl PlayerWalletRegistry {
     pub fn linked_wallet(&self, player_id: &str) -> Option<&str> {
         self.linked_wallets.get(player_id).map(String::as_str)
     }
+
+    pub fn account(&self, player_id: &str) -> Option<WalletAccount> {
+        self.linked_wallet(player_id).map(|wallet| WalletAccount {
+            player_id: player_id.to_owned(),
+            wallet: wallet.to_owned(),
+        })
+    }
+
+    pub fn player_for_wallet(&self, wallet: &str) -> Option<&str> {
+        self.linked_wallets
+            .iter()
+            .find_map(|(player_id, linked_wallet)| (linked_wallet == wallet).then_some(player_id.as_str()))
+    }
 }
 
 pub struct PropertyRuntime<P: BlockchainProvider = MockBlockchainProvider> {
@@ -780,7 +819,9 @@ impl PropertyRuntime<MockBlockchainProvider> {
 
     pub fn with_persistence_path(path: impl Into<PathBuf>) -> Self {
         let mut runtime = Self::new();
-        runtime.service.set_persistence_path(path.into());
+        let path = path.into();
+        runtime.service.set_persistence_path(path.clone());
+        runtime.service.load_or_generate_parcels(path.with_file_name("property_parcels.json"));
         runtime.service.load_placements();
         runtime
     }
@@ -843,6 +884,10 @@ impl<P: BlockchainProvider> PropertyRuntime<P> {
             .insert(player_id.to_string(), wallet.to_string());
     }
 
+    pub fn account(&self, player_id: &str) -> Option<WalletAccount> {
+        self.service.wallets.account(player_id)
+    }
+
     pub fn sandbox_assign_land(&mut self, player_id: &str, land_nft_id: &str) -> bool {
         let Some(wallet) = self.service.wallets.linked_wallet(player_id).map(str::to_owned) else {
             return false;
@@ -870,14 +915,44 @@ impl<P: BlockchainProvider> PropertyRuntime<P> {
     pub fn building_type_for_placement(&self, building_nft_id: &str) -> Option<String> {
         self.service.building_type_for_placement(building_nft_id)
     }
+
+    pub fn reserve_purchase(
+        &mut self,
+        player_id: &str,
+        parcel_id: &str,
+    ) -> PropertyResult<u64> {
+        self.service.reserve_purchase(player_id, parcel_id)
+    }
+
+    pub fn release_purchase(&mut self, parcel_id: &str) {
+        self.service.release_purchase(parcel_id);
+    }
+
+    pub fn reserved_purchase_price(
+        &mut self,
+        player_id: &str,
+        parcel_id: &str,
+    ) -> PropertyResult<u64> {
+        self.service.reserved_purchase_price(player_id, parcel_id)
+    }
+
+    pub fn complete_sandbox_purchase(
+        &mut self,
+        player_id: &str,
+        parcel_id: &str,
+    ) -> bool {
+        self.service.complete_sandbox_purchase(player_id, parcel_id)
+    }
 }
 
 pub struct PropertyService<P: BlockchainProvider> {
     provider: Arc<P>,
     wallets: PlayerWalletRegistry,
     parcels: HashMap<String, PropertyParcel>,
+    protected_zones: Vec<ProtectedZone>,
     building_assets: HashMap<String, BuildingAsset>,
     placements: HashMap<String, Vec<PlacedBuilding>>,
+    reservations: HashMap<String, (String, Instant)>,
     persistence_path: Option<PathBuf>,
 }
 
@@ -913,9 +988,13 @@ impl<P: BlockchainProvider> PropertyService<P> {
                     id: parcel.id.clone(),
                     name: format!("{} Land {}", parcel.land_type, parcel.id),
                     world_id: parcel.world_id.clone(),
-                    continent: "Uncharted Continent".to_string(),
-                    region: "Frontier Region".to_string(),
+                    continent: parcel.continent.clone(),
+                    region: parcel.region.clone(),
                     land_type: parcel.land_type.clone(),
+                    rarity: parcel.rarity.clone(),
+                    terrain_type: parcel.terrain_type.clone(),
+                    water_access: parcel.water_access,
+                    road_access: parcel.road_access,
                     size_label: if parcel.max_buildings >= 20 {
                         "Vast".to_string()
                     } else if parcel.max_buildings >= 10 {
@@ -926,6 +1005,23 @@ impl<P: BlockchainProvider> PropertyService<P> {
                         "Small".to_string()
                     },
                     price_lamports: 0,
+                    price_vgld_base_units: parcel.price_vgld_base_units,
+                    status: if self.parcel_is_protected(parcel) {
+                        "PROTECTED".to_string()
+                    } else if self.parcel_is_reserved(&parcel.id) {
+                        "RESERVED".to_string()
+                    } else if player_id
+                        .and_then(|player_id| self.wallets.linked_wallet(player_id))
+                        .is_some_and(|wallet| {
+                            self.provider
+                                .verify_land_ownership(wallet, &parcel.land_nft_id, "land")
+                        })
+                    {
+                        "OWNED".to_string()
+                    } else {
+                        "AVAILABLE".to_string()
+                    },
+                    protected: self.parcel_is_protected(parcel),
                     is_owned: player_id
                         .and_then(|player_id| self.wallets.linked_wallet(player_id))
                         .is_some_and(|wallet| {
@@ -979,8 +1075,10 @@ impl<P: BlockchainProvider> PropertyService<P> {
             provider,
             wallets: PlayerWalletRegistry::new().with_challenge_ttl(Duration::from_secs(300)),
             parcels: HashMap::new(),
+            protected_zones: Vec::new(),
             building_assets: HashMap::new(),
             placements: HashMap::new(),
+            reservations: HashMap::new(),
             persistence_path: None,
         }
     }
@@ -1042,15 +1140,153 @@ impl<P: BlockchainProvider> PropertyService<P> {
         self.parcels.insert(parcel.id.clone(), parcel);
     }
 
+    pub fn reserve_purchase(
+        &mut self,
+        player_id: &str,
+        parcel_id: &str,
+    ) -> PropertyResult<u64> {
+        self.reservations
+            .retain(|_, (_, created)| created.elapsed() < Duration::from_secs(300));
+        let parcel = self
+            .parcels
+            .get(parcel_id)
+            .ok_or(PropertyError::ParcelNotFound)?;
+        if self.parcel_is_protected(parcel) {
+            return Err(PropertyError::ProtectedZone);
+        }
+        if self.reservations.contains_key(parcel_id) {
+            return Err(PropertyError::PurchaseReserved);
+        }
+        let wallet = self
+            .wallets
+            .linked_wallet(player_id)
+            .ok_or(PropertyError::WalletNotLinked)?;
+        if self
+            .provider
+            .verify_land_ownership(wallet, &parcel.land_nft_id, "land")
+        {
+            return Err(PropertyError::LandOwnershipMissing);
+        }
+        self.reservations
+            .insert(parcel_id.to_string(), (player_id.to_string(), Instant::now()));
+        Ok(parcel.price_vgld_base_units)
+    }
+
+    pub fn release_purchase(&mut self, parcel_id: &str) {
+        self.reservations.remove(parcel_id);
+    }
+
+    pub fn reserved_purchase_price(
+        &mut self,
+        player_id: &str,
+        parcel_id: &str,
+    ) -> PropertyResult<u64> {
+        self.reservations
+            .retain(|_, (_, created)| created.elapsed() < Duration::from_secs(300));
+        let Some((reserved_player, _)) = self.reservations.get(parcel_id) else {
+            return Err(PropertyError::PurchaseReserved);
+        };
+        if reserved_player != player_id {
+            return Err(PropertyError::PurchaseReserved);
+        }
+        self.parcels
+            .get(parcel_id)
+            .map(|parcel| parcel.price_vgld_base_units)
+            .ok_or(PropertyError::ParcelNotFound)
+    }
+
+    pub fn complete_sandbox_purchase(&mut self, player_id: &str, parcel_id: &str) -> bool {
+        let Ok(_) = self.reserved_purchase_price(player_id, parcel_id) else {
+            return false;
+        };
+        let Some(wallet) = self.wallets.linked_wallet(player_id).map(str::to_owned) else {
+            return false;
+        };
+        let Some(land_nft_id) = self.parcels.get(parcel_id).map(|parcel| parcel.land_nft_id.clone())
+        else {
+            return false;
+        };
+        if !self.sandbox_assign_land(&wallet, &land_nft_id) {
+            return false;
+        }
+        self.reservations.remove(parcel_id);
+        true
+    }
+
+    fn parcel_is_reserved(&self, parcel_id: &str) -> bool {
+        self.reservations.contains_key(parcel_id)
+    }
+
+    pub fn register_protected_zone(&mut self, zone: ProtectedZone) {
+        self.protected_zones.push(zone);
+    }
+
+    fn parcel_is_protected(&self, parcel: &PropertyParcel) -> bool {
+        parcel.protected
+            || self.protected_zones.iter().any(|zone| {
+                zone.world_id == parcel.world_id
+                    && zone.bounds.min_x <= parcel.bounds.max_x
+                    && zone.bounds.max_x >= parcel.bounds.min_x
+                    && zone.bounds.min_y <= parcel.bounds.max_y
+                    && zone.bounds.max_y >= parcel.bounds.min_y
+            })
+    }
+
     pub fn register_default_development_parcels(&mut self) {
         let farm_land_nft_id = std::env::var("VELOREN_MARKETPLACE_LAND_MINT")
             .unwrap_or_else(|_| "land-2".to_string());
+        for (id, min_x, min_y, max_x, max_y, reason) in [
+            (
+                "PROTECTED-C1-CAPITAL",
+                -640,
+                -640,
+                -320,
+                -320,
+                "capital city",
+            ),
+            (
+                "PROTECTED-C2-CAPITAL",
+                -160,
+                -160,
+                160,
+                160,
+                "capital city",
+            ),
+            (
+                "PROTECTED-C3-CAPITAL",
+                320,
+                320,
+                640,
+                640,
+                "capital city",
+            ),
+        ] {
+            self.register_protected_zone(ProtectedZone {
+                id: id.to_string(),
+                world_id: "WORLD-001".to_string(),
+                bounds: ParcelBounds {
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                },
+                reason: reason.to_string(),
+            });
+        }
         let default_parcels = [
             PropertyParcel {
                 id: "DEV-LAND-0001".to_string(),
                 land_nft_id: "land-1".to_string(),
                 world_id: "WORLD-001".to_string(),
+                continent: "continent-1".to_string(),
+                region: "frontier-town".to_string(),
                 land_type: "town".to_string(),
+                rarity: "rare".to_string(),
+                terrain_type: "forest edge".to_string(),
+                water_access: true,
+                road_access: true,
+                price_vgld_base_units: 2_500 * 1_000_000_000,
+                protected: false,
                 bounds: ParcelBounds {
                     min_x: -32,
                     min_y: -32,
@@ -1070,7 +1306,15 @@ impl<P: BlockchainProvider> PropertyService<P> {
                 id: "DEV-LAND-0002".to_string(),
                 land_nft_id: farm_land_nft_id,
                 world_id: "WORLD-001".to_string(),
+                continent: "continent-2".to_string(),
+                region: "silver-river-valley".to_string(),
                 land_type: "farm".to_string(),
+                rarity: "uncommon".to_string(),
+                terrain_type: "river valley".to_string(),
+                water_access: true,
+                road_access: true,
+                price_vgld_base_units: 800 * 1_000_000_000,
+                protected: false,
                 bounds: ParcelBounds {
                     min_x: 200,
                     min_y: 80,
@@ -1088,7 +1332,15 @@ impl<P: BlockchainProvider> PropertyService<P> {
                 id: "DEV-LAND-0003".to_string(),
                 land_nft_id: "land-3".to_string(),
                 world_id: "WORLD-001".to_string(),
+                continent: "continent-3".to_string(),
+                region: "highland-citadel".to_string(),
                 land_type: "citadel".to_string(),
+                rarity: "epic".to_string(),
+                terrain_type: "mountain valley".to_string(),
+                water_access: false,
+                road_access: false,
+                price_vgld_base_units: 10_000 * 1_000_000_000,
+                protected: false,
                 bounds: ParcelBounds {
                     min_x: -300,
                     min_y: -220,
@@ -1106,6 +1358,100 @@ impl<P: BlockchainProvider> PropertyService<P> {
 
         for parcel in default_parcels {
             self.register_parcel(parcel);
+        }
+    }
+
+    fn load_or_generate_parcels(&mut self, path: PathBuf) {
+        if let Ok(bytes) = fs::read(&path) {
+            if let Ok(parcels) = serde_json::from_slice::<Vec<PropertyParcel>>(&bytes) {
+                for parcel in parcels {
+                    self.register_parcel(parcel);
+                }
+                return;
+            }
+        }
+
+        self.register_generated_parcels();
+        let parcels = self
+            .parcels
+            .values()
+            .filter(|parcel| !parcel.id.starts_with("DEV-"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let temporary_path = path.with_extension("tmp");
+        if let Ok(bytes) = serde_json::to_vec_pretty(&parcels) {
+            if fs::write(&temporary_path, bytes)
+                .and_then(|_| fs::rename(&temporary_path, &path))
+                .is_err()
+            {
+                tracing::warn!(?path, "Unable to persist generated parcel catalog");
+            }
+        }
+    }
+
+    fn register_generated_parcels(&mut self) {
+        let locations = [
+            ("C1", "continent-1", "western frontier", -900, -180),
+            ("C1", "continent-1", "western forest edge", -760, 420),
+            ("C1", "continent-1", "western foothills", -520, -520),
+            ("C2", "continent-2", "central river valley", -120, 520),
+            ("C2", "continent-2", "central high plains", 180, -520),
+            ("C2", "continent-2", "central lakeside", 520, 260),
+            ("C3", "continent-3", "eastern desert edge", 760, -260),
+            ("C3", "continent-3", "eastern mountain valley", 900, 460),
+            ("C3", "continent-3", "eastern coastal plain", 520, -700),
+        ];
+        let types = [
+            ("homestead", "common", 2_usize, 96, 96, 150_u64),
+            ("farm", "uncommon", 5, 160, 128, 800),
+            ("ranch", "rare", 7, 224, 176, 1400),
+        ];
+
+        for (index, (continent_id, continent, region, center_x, center_y)) in
+            locations.into_iter().enumerate()
+        {
+            for (type_index, (land_type, rarity, capacity, width, height, price_vgld)) in
+                types.into_iter().enumerate()
+            {
+                let id = format!("LAND-WORLD001-{continent_id}-{index:02}{type_index:02}");
+                let min_x = center_x + type_index as i32 * 280 - width / 2;
+                let min_y = center_y + type_index as i32 * 220 - height / 2;
+                self.register_parcel(PropertyParcel {
+                    id,
+                    land_nft_id: format!("unminted-land-{index:02}-{type_index:02}"),
+                    world_id: "WORLD-001".to_string(),
+                    continent: continent.to_string(),
+                    region: region.to_string(),
+                    land_type: land_type.to_string(),
+                    rarity: rarity.to_string(),
+                    terrain_type: match type_index {
+                        0 => "plains",
+                        1 => "farmland",
+                        _ => "high plains",
+                    }
+                    .to_string(),
+                    water_access: type_index != 1,
+                    road_access: type_index == 1,
+                    price_vgld_base_units: price_vgld * 1_000_000_000,
+                    protected: false,
+                    bounds: ParcelBounds {
+                        min_x,
+                        min_y,
+                        max_x: min_x + width,
+                        max_y: min_y + height,
+                    },
+                    allowed_buildings: vec![
+                        "house".to_string(),
+                        "farmhouse".to_string(),
+                        "barn".to_string(),
+                        "stable".to_string(),
+                    ],
+                    max_buildings: capacity,
+                });
+            }
         }
     }
 
@@ -1254,6 +1600,9 @@ impl<P: BlockchainProvider> PropertyService<P> {
             .parcels
             .get(parcel_id)
             .ok_or(PropertyError::ParcelNotFound)?;
+        if self.parcel_is_protected(parcel) {
+            return Err(PropertyError::ProtectedZone);
+        }
         if !self
             .provider
             .verify_land_ownership(wallet, land_nft_id, "land")
@@ -1400,7 +1749,15 @@ mod tests {
             id: "parcel-1".to_string(),
             land_nft_id: "land-1".to_string(),
             world_id: "world-1".to_string(),
+            continent: "continent-test".to_string(),
+            region: "region-test".to_string(),
             land_type: "town".to_string(),
+            rarity: "common".to_string(),
+            terrain_type: "plains".to_string(),
+            water_access: false,
+            road_access: false,
+            price_vgld_base_units: 0,
+            protected: false,
             bounds: ParcelBounds {
                 min_x: 0,
                 min_y: 0,
@@ -1421,6 +1778,32 @@ mod tests {
         );
 
         assert_eq!(err, Err(PropertyError::WalletNotLinked));
+    }
+
+    #[test]
+    fn wallet_registry_exposes_vgld_account_lookup() {
+        let mut registry = PlayerWalletRegistry::new();
+        let (wallet, signing_key) = test_wallet();
+        let challenge = registry.issue_challenge("player-1");
+        let signature = bs58::encode(
+            signing_key
+                .sign(wallet_link_message(&wallet, &challenge).as_bytes())
+                .to_bytes(),
+        )
+        .into_string();
+
+        registry
+            .link_wallet("player-1", &wallet, &challenge, &signature)
+            .unwrap();
+
+        assert_eq!(
+            registry.account("player-1"),
+            Some(WalletAccount {
+                player_id: "player-1".to_string(),
+                wallet: wallet.clone(),
+            })
+        );
+        assert_eq!(registry.player_for_wallet(&wallet), Some("player-1"));
     }
 
     #[test]
@@ -1462,7 +1845,15 @@ mod tests {
             id: "parcel-1".to_string(),
             land_nft_id: "land-1".to_string(),
             world_id: "world-1".to_string(),
+            continent: "continent-test".to_string(),
+            region: "region-test".to_string(),
             land_type: "town".to_string(),
+            rarity: "common".to_string(),
+            terrain_type: "plains".to_string(),
+            water_access: false,
+            road_access: false,
+            price_vgld_base_units: 0,
+            protected: false,
             bounds: ParcelBounds {
                 min_x: 0,
                 min_y: 0,
@@ -1539,7 +1930,15 @@ mod tests {
             id: "parcel-1".to_string(),
             land_nft_id: "land-1".to_string(),
             world_id: "world-1".to_string(),
+            continent: "continent-test".to_string(),
+            region: "region-test".to_string(),
             land_type: "town".to_string(),
+            rarity: "common".to_string(),
+            terrain_type: "plains".to_string(),
+            water_access: false,
+            road_access: false,
+            price_vgld_base_units: 0,
+            protected: false,
             bounds: ParcelBounds {
                 min_x: 0,
                 min_y: 0,
@@ -1613,7 +2012,15 @@ mod tests {
             id: "parcel-1".to_string(),
             land_nft_id: "land-1".to_string(),
             world_id: "world-1".to_string(),
+            continent: "continent-test".to_string(),
+            region: "region-test".to_string(),
             land_type: "town".to_string(),
+            rarity: "common".to_string(),
+            terrain_type: "plains".to_string(),
+            water_access: false,
+            road_access: false,
+            price_vgld_base_units: 0,
+            protected: false,
             bounds: ParcelBounds {
                 min_x: 0,
                 min_y: 0,
@@ -1672,6 +2079,50 @@ mod tests {
     }
 
     #[test]
+    fn property_service_reserves_available_parcel_once() {
+        let mut service =
+            PropertyService::new(Arc::new(MockBlockchainProvider::new()));
+        service.register_parcel(PropertyParcel {
+            id: "parcel-1".to_string(),
+            land_nft_id: "land-1".to_string(),
+            world_id: "world-1".to_string(),
+            continent: "continent-test".to_string(),
+            region: "region-test".to_string(),
+            land_type: "farm".to_string(),
+            rarity: "common".to_string(),
+            terrain_type: "plains".to_string(),
+            water_access: false,
+            road_access: true,
+            price_vgld_base_units: 800,
+            protected: false,
+            bounds: ParcelBounds {
+                min_x: 0,
+                min_y: 0,
+                max_x: 100,
+                max_y: 100,
+            },
+            allowed_buildings: vec!["farmhouse".to_string()],
+            max_buildings: 5,
+        });
+        service
+            .wallets
+            .linked_wallets
+            .insert("player-1".to_string(), "wallet-1".to_string());
+
+        assert_eq!(service.reserve_purchase("player-1", "parcel-1"), Ok(800));
+        assert_eq!(
+            service.reserve_purchase("player-2", "parcel-1"),
+            Err(PropertyError::PurchaseReserved)
+        );
+        service.release_purchase("parcel-1");
+        service
+            .wallets
+            .linked_wallets
+            .insert("player-2".to_string(), "wallet-2".to_string());
+        assert_eq!(service.reserve_purchase("player-2", "parcel-1"), Ok(800));
+    }
+
+    #[test]
     fn property_service_rejects_overlapping_buildings() {
         let mut provider = MockBlockchainProvider::new();
         let (wallet, signing_key) = test_wallet();
@@ -1709,7 +2160,15 @@ mod tests {
             id: "parcel-1".to_string(),
             land_nft_id: "land-1".to_string(),
             world_id: "world-1".to_string(),
+            continent: "continent-test".to_string(),
+            region: "region-test".to_string(),
             land_type: "town".to_string(),
+            rarity: "common".to_string(),
+            terrain_type: "plains".to_string(),
+            water_access: false,
+            road_access: false,
+            price_vgld_base_units: 0,
+            protected: false,
             bounds: ParcelBounds {
                 min_x: 0,
                 min_y: 0,

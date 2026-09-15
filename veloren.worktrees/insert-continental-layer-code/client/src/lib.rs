@@ -148,6 +148,12 @@ pub enum Event {
         state: common_net::msg::PropertyPurchaseState,
         message: String,
     },
+    VgldAccount {
+        wallet: Option<String>,
+        balance_base_units: u64,
+        decimals: u8,
+        status: String,
+    },
     Dialogue(Uid, rtsim::Dialogue<true>),
     Gizmos(Vec<Gizmos>),
 }
@@ -1338,6 +1344,8 @@ impl Client {
                     | ClientGeneral::RequestPropertyPlacement { .. }
                     | ClientGeneral::RequestPropertyParcels
                     | ClientGeneral::RequestPropertyPurchase { .. }
+                    | ClientGeneral::RequestVgldAccount
+                    | ClientGeneral::RequestVgldDeposit { .. }
                     | ClientGeneral::RequestPlugins(_) => &mut self.general_stream,
                 };
                 #[cfg(feature = "tracy")]
@@ -1404,6 +1412,14 @@ impl Client {
 
     pub fn request_property_purchase(&mut self, parcel_id: String) {
         self.send_msg(ClientGeneral::RequestPropertyPurchase { parcel_id });
+    }
+
+    pub fn request_vgld_account(&mut self) {
+        self.send_msg(ClientGeneral::RequestVgldAccount);
+    }
+
+    pub fn request_vgld_deposit(&mut self, transaction_id: String) {
+        self.send_msg(ClientGeneral::RequestVgldDeposit { transaction_id });
     }
 
     fn send_msg<S>(&mut self, msg: S)
@@ -3026,6 +3042,19 @@ impl Client {
                     parcel_id,
                     state,
                     message,
+                });
+            },
+            ServerGeneral::VgldAccount {
+                wallet,
+                balance_base_units,
+                decimals,
+                status,
+            } => {
+                frontend_events.push(Event::VgldAccount {
+                    wallet,
+                    balance_base_units,
+                    decimals,
+                    status,
                 });
             },
             ServerGeneral::SetPlayerRole(role) => {

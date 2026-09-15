@@ -9,8 +9,10 @@ use tracing::{info, warn};
 
 const CALLBACK_ADDR: &str = "127.0.0.1:38291";
 const PURCHASE_CALLBACK_ADDR: &str = "127.0.0.1:38292";
+const VGLD_CALLBACK_ADDR: &str = "127.0.0.1:38293";
 const BRIDGE_HTML: &str = include_str!("../../wallet-bridge/index.html");
 const PURCHASE_HTML: &str = include_str!("../../wallet-bridge/purchase.html");
+const VGLD_HTML: &str = include_str!("../../wallet-bridge/vgld.html");
 const CHALLENGE_PLACEHOLDER: &str = "__VELOREN_CHALLENGE__";
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +26,13 @@ pub struct WalletLink {
 pub struct PropertyPurchase {
     pub wallet: String,
     pub parcel_id: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VgldDeposit {
+    pub wallet: String,
+    pub amount: u64,
     pub signature: String,
 }
 
@@ -75,6 +84,49 @@ impl WalletBridge {
 
 pub struct PurchaseBridge {
     receiver: Receiver<PropertyPurchase>,
+}
+
+pub struct VgldBridge {
+    receiver: Receiver<VgldDeposit>,
+}
+
+impl VgldBridge {
+    pub fn start(amount: u64, mint: &str, treasury: &str) -> Result<Self, String> {
+        let listener = TcpListener::bind(VGLD_CALLBACK_ADDR).map_err(|error| {
+            format!("could not start VGLD callback listener on {VGLD_CALLBACK_ADDR}: {error}")
+        })?;
+        let (sender, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("veloren-vgld-bridge".to_string())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(mut stream) => match handle_vgld_callback(&mut stream) {
+                            Ok(Some(deposit)) => {
+                                if sender.send(deposit).is_err() {
+                                    break;
+                                }
+                                break;
+                            },
+                            Ok(None) => {},
+                            Err(error) => warn!(?error, "VGLD callback request failed"),
+                        },
+                        Err(error) => warn!(?error, "VGLD callback connection failed"),
+                    }
+                }
+            })
+            .map_err(|error| format!("could not start VGLD callback thread: {error}"))?;
+
+        let url = format!(
+            "http://{VGLD_CALLBACK_ADDR}/?amount={amount}&mint={}&treasury={}",
+            percent_encode(mint),
+            percent_encode(treasury)
+        );
+        open::that_detached(url).map_err(|error| format!("could not open VGLD bridge: {error}"))?;
+        Ok(Self { receiver })
+    }
+
+    pub fn try_receive(&self) -> Option<VgldDeposit> { self.receiver.try_recv().ok() }
 }
 
 impl PurchaseBridge {
@@ -184,6 +236,38 @@ fn handle_purchase_callback(
     }
     write_response(&mut stream, 200, "purchase received")?;
     Ok(Some(purchase))
+}
+
+fn handle_vgld_callback(stream: &mut TcpStream) -> Result<Option<VgldDeposit>, String> {
+    let (mut request, header_end) = read_request_headers(stream)?;
+    let headers = String::from_utf8(request[..header_end].to_vec())
+        .map_err(|error| format!("VGLD callback headers were not UTF-8: {error}"))?;
+    let body_start = header_end + 4;
+    let mut request_line = headers.lines().next().unwrap_or_default().split_whitespace();
+    let method = request_line.next().unwrap_or_default();
+    let target = request_line.next().unwrap_or_default();
+    if method == "GET" {
+        let page = VGLD_HTML
+            .replace("__VELOREN_AMOUNT__", &query_parameter(target, "amount").unwrap_or_default())
+            .replace("__VELOREN_MINT__", &query_parameter(target, "mint").unwrap_or_default())
+            .replace("__VELOREN_TREASURY__", &query_parameter(target, "treasury").unwrap_or_default());
+        write_html(stream, &page)?;
+        return Ok(None);
+    }
+    if method == "OPTIONS" {
+        write_response(stream, 204, "")?;
+        return Ok(None);
+    }
+    if method != "POST" {
+        write_response(stream, 405, "method not allowed")?;
+        return Ok(None);
+    }
+    let length = content_length(&headers)?;
+    read_body(stream, &mut request, body_start, length)?;
+    let deposit = serde_json::from_slice(&request[body_start..body_start + length])
+        .map_err(|error| format!("invalid VGLD callback JSON: {error}"))?;
+    write_response(stream, 200, "VGLD deposit received")?;
+    Ok(Some(deposit))
 }
 
 fn read_request_headers(stream: &mut TcpStream) -> Result<(Vec<u8>, usize), String> {

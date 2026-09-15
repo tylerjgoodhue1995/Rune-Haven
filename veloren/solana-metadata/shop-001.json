@@ -1,0 +1,14 @@
+{
+  "name": "Shop Building #001",
+  "description": "Shop building for WORLD-001 in the Veloren MMORPG.",
+  "attributes": [
+    {
+      "trait_type": "asset_type",
+      "value": "building"
+    },
+    {
+      "trait_type": "building_type",
+      "value": "shop"
+    }
+  ]
+}

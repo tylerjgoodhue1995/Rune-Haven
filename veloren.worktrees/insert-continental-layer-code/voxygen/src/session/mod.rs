@@ -52,7 +52,7 @@ use crate::{
     scene::{CameraMode, DebugShapeId, Scene, SceneData, camera},
     session::target::ray_entities,
     settings::Settings,
-    wallet_bridge::{PurchaseBridge, WalletBridge},
+    wallet_bridge::{PurchaseBridge, VgldBridge, WalletBridge},
     window::{AnalogGameInput, Event},
 };
 use hashbrown::HashMap;
@@ -129,6 +129,7 @@ pub struct SessionState {
     property_parcel_outlines: HashSet<String>,
     pending_property_parcels: Vec<common_net::msg::PropertyParcelInfo>,
     wallet_bridge: Option<WalletBridge>,
+    vgld_bridge: Option<VgldBridge>,
     purchase_bridge: Option<PurchaseBridge>,
 }
 
@@ -175,6 +176,7 @@ impl SessionState {
             }
         }
         let hud = Hud::new(global_state, persisted_state, &client.borrow());
+        client.borrow_mut().request_vgld_account();
         let walk_forward_dir = scene.camera().forward_xy();
         let walk_right_dir = scene.camera().right_xy();
 
@@ -210,6 +212,7 @@ impl SessionState {
             property_parcel_outlines: HashSet::new(),
             pending_property_parcels: Vec::new(),
             wallet_bridge: None,
+            vgld_bridge: None,
             purchase_bridge: None,
         }
     }
@@ -334,6 +337,14 @@ impl SessionState {
         {
             info!("received wallet link data from browser bridge");
             client.link_wallet(link.wallet, link.challenge, link.signature);
+        }
+
+        if let Some(deposit) = self.vgld_bridge.as_ref().and_then(VgldBridge::try_receive) {
+            self.vgld_bridge = None;
+            client.request_vgld_deposit(deposit.signature);
+            self.hud.set_vgld_account_status(
+                "Deposit submitted. Waiting for server verification...".to_string(),
+            );
         }
 
         if let Some(purchase) = self
@@ -551,6 +562,21 @@ impl SessionState {
                     } else {
                         ChatType::CommandError.into_plain_msg(message)
                     });
+                },
+                client::Event::VgldAccount {
+                    wallet,
+                    balance_base_units,
+                    decimals,
+                    status,
+                } => {
+                    let wallet = wallet.unwrap_or_else(|| "Wallet not linked".to_string());
+                    let divisor = 10u64.saturating_pow(decimals as u32).max(1);
+                    let whole = balance_base_units / divisor;
+                    let fraction = balance_base_units % divisor;
+                    self.hud.set_vgld_account_status(format!(
+                        "{whole}.{fraction:0width$} VGLD\n{status}\n{wallet}",
+                        width = decimals as usize,
+                    ));
                 },
                 client::Event::PropertyPurchaseResult {
                     parcel_id,
@@ -1968,8 +1994,20 @@ impl PlayState for SessionState {
             for event in hud_events {
                 match event {
                     HudEvent::SendMessage(msg) => {
-                        // TODO: Handle result
-                        self.client.borrow_mut().send_chat(msg);
+                        if let Some(transaction_id) = msg.strip_prefix("/vgld_deposit ") {
+                            let transaction_id = transaction_id.trim();
+                            if transaction_id.is_empty() {
+                                self.hud.set_vgld_account_status(
+                                    "Paste a Solana transaction signature.".to_string(),
+                                );
+                            } else {
+                                self.client
+                                    .borrow_mut()
+                                    .request_vgld_deposit(transaction_id.to_string());
+                            }
+                        } else {
+                            self.client.borrow_mut().send_chat(msg);
+                        }
                     },
                     HudEvent::SendCommand(name, args) => {
                         match run_command(self, global_state, &name, args) {
@@ -2255,6 +2293,28 @@ impl PlayState for SessionState {
                     },
                     HudEvent::RequestPropertyParcels => {
                         self.client.borrow_mut().request_property_parcels();
+                    },
+                    HudEvent::DepositVgld => {
+                        let mint = std::env::var("VELOREN_VGLD_MINT")
+                            .or_else(|_| std::env::var("VGLD_MINT_ADDRESS"));
+                        let treasury = std::env::var("VELOREN_VGLD_TREASURY");
+                        match (mint, treasury) {
+                            (Ok(mint), Ok(treasury)) if !mint.trim().is_empty() && !treasury.trim().is_empty() => {
+                                match VgldBridge::start(1_000_000_000, &mint, &treasury) {
+                                    Ok(bridge) => {
+                                        self.vgld_bridge = Some(bridge);
+                                        self.hud.set_vgld_account_status(
+                                            "Approve the 1 VGLD transfer in Phantom...".to_string(),
+                                        );
+                                    },
+                                    Err(error) => self.hud.set_vgld_account_status(error),
+                                }
+                            },
+                            _ => self.hud.set_vgld_account_status(
+                                "Set VELOREN_VGLD_MINT and VELOREN_VGLD_TREASURY to enable automatic deposits."
+                                    .to_string(),
+                            ),
+                        }
                     },
                     HudEvent::PurchaseSelectedProperty => {
                         if let Some(parcel_id) = self.hud.selected_property_id() {

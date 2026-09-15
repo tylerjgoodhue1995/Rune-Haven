@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deposit VGLD | Veloren</title>
+<style>
+  body { background: #0b1018; color: #f4f7fb; font: 16px sans-serif; margin: 3rem auto; max-width: 30rem; padding: 0 1rem; }
+  button, input { font: inherit; padding: .7rem 1rem; }
+  button { cursor: pointer; }
+  input { width: 8rem; }
+  #status { min-height: 2rem; color: #aeb9c9; line-height: 1.45; }
+</style>
+<h1>Deposit VGLD</h1>
+<p>Choose an amount. Phantom will show the exact token transfer before anything is sent.</p>
+<label>Amount <input id="amount" type="number" min="0.000000001" step="0.000000001" value="1"></label>
+<button id="deposit">Connect wallet and deposit</button>
+<p id="status" role="status" aria-live="polite">Your private key stays in Phantom.</p>
+<script src="https://unpkg.com/@solana/web3.js@1.98.4/lib/index.iife.min.js"></script>
+<script src="https://unpkg.com/@solana/spl-token@0.4.9/lib/index.iife.min.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  const mint = params.get("mint");
+  const treasury = params.get("treasury");
+  const callback = "http://127.0.0.1:38293/callback";
+  const decimals = 9;
+  const status = document.getElementById("status");
+  const button = document.getElementById("deposit");
+  const provider = () => window.phantom?.solana || window.solana;
+  const setStatus = message => status.textContent = message;
+
+  button.addEventListener("click", async () => {
+    const walletProvider = provider();
+    if (!mint || !treasury) {
+      setStatus("VGLD deposits are not configured on this client.");
+      return;
+    }
+    if (!walletProvider?.isPhantom) {
+      setStatus("Phantom was not detected. Install and unlock Phantom, then reload this page.");
+      return;
+    }
+    const amount = Number(document.getElementById("amount").value);
+    if (!Number.isFinite(amount) || amount <= 0 || !Number.isInteger(amount * 10 ** decimals)) {
+      setStatus("Enter a positive amount with at most 9 decimal places.");
+      return;
+    }
+    button.disabled = true;
+    try {
+      setStatus("Connecting to Phantom...");
+      const { publicKey } = await walletProvider.connect();
+      const connection = new solanaWeb3.Connection("https://api.devnet.solana.com", "confirmed");
+      const mintKey = new solanaWeb3.PublicKey(mint);
+      const treasuryKey = new solanaWeb3.PublicKey(treasury);
+      const sourceAta = await splToken.getAssociatedTokenAddress(mintKey, publicKey);
+      const destinationAta = await splToken.getAssociatedTokenAddress(mintKey, treasuryKey);
+      const transaction = new solanaWeb3.Transaction();
+      if (!(await connection.getAccountInfo(destinationAta))) {
+        transaction.add(splToken.createAssociatedTokenAccountInstruction(
+          publicKey, destinationAta, treasuryKey, mintKey
+        ));
+      }
+      transaction.add(splToken.createTransferCheckedInstruction(
+        sourceAta, mintKey, destinationAta, publicKey,
+        BigInt(Math.round(amount * 10 ** decimals)), decimals
+      ));
+      transaction.feePayer = publicKey;
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      transaction.recentBlockhash = blockhash;
+      setStatus("Waiting for wallet approval...");
+      const result = await walletProvider.signAndSendTransaction(transaction);
+      setStatus("Confirming the deposit...");
+      await connection.confirmTransaction(result.signature, "finalized");
+      await fetch(callback, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          wallet: publicKey.toString(),
+          amount: Math.round(amount * 10 ** decimals),
+          signature: result.signature
+        })
+      });
+      setStatus("Deposit submitted. The game will credit it after server verification.");
+    } catch (error) {
+      setStatus(`Deposit failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>

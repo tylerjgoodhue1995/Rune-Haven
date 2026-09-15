@@ -1,0 +1,177 @@
+[package]
+name = "veloren-voxygen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "veloren-voxygen"
+# Cargo thinks it should build the voxygen binary even when a specific bench is specified for building
+# Uncomment below and comment out default-run if you want to avoid this
+# autobins = false
+
+[lints]
+workspace = true
+
+[package.metadata.nix]
+build = true
+app = true
+desktopFile = "./assets/voxygen/net.veloren.veloren.desktop"
+longDescription = """
+Veloren is a multiplayer voxel RPG written in Rust.
+It is inspired by games such as Cube World, Legend of Zelda: Breath of the Wild, Dwarf Fortress and Minecraft.
+
+This package includes the official client, Voxygen.
+"""
+
+[features]
+hot-anim = ["anim/use-dyn-lib"]
+hot-egui = ["voxygen-egui/use-dyn-lib", "egui"]
+hot-reloading = ["common/hot-reloading"]
+singleplayer = ["server"]
+simd = ["vek/platform_intrinsics"]
+tracy = ["common-frontend/tracy", "client/tracy", "wgpu-profiler/tracy"]
+# enables heap profiling with tracy
+tracy-memory = ["tracy"]
+plugins = ["client/plugins", "server/plugins", "anim/plugins", "common/plugins"]
+egui-ui = ["voxygen-egui", "egui", "egui-wgpu", "egui-winit"]
+shaderc-from-source = ["shaderc/build-from-source"]
+discord = ["discord-sdk"]
+bin_cmd_doc_gen = []
+
+# We don't ship egui with published release builds so a separate feature is required that excludes it.
+default-publish = [
+    "singleplayer",
+    "native-dialog",
+    "plugins",
+    "discord",
+    "simd",
+]
+default = ["default-publish", "hot-reloading", "shaderc-from-source", "egui-ui"]
+
+[dependencies]
+client = { package = "veloren-client", path = "../client" }
+common = { package = "veloren-common", path = "../common" }
+common-base = { package = "veloren-common-base", path = "../common/base" }
+common-ecs = { package = "veloren-common-ecs", path = "../common/ecs" }
+common-frontend = { package = "veloren-common-frontend", path = "../common/frontend" }
+common-i18n = { package = "veloren-common-i18n", path = "../common/i18n" }
+common-net = { package = "veloren-common-net", path = "../common/net" }
+common-state = { package = "veloren-common-state", path = "../common/state" }
+common-systems = { package = "veloren-common-systems", path = "../common/systems" }
+
+anim = { package = "veloren-voxygen-anim", path = "anim" }
+i18n = { package = "veloren-client-i18n", path = "../client/i18n" }
+i18n-helpers = { package = "veloren-voxygen-i18n-helpers", path = "i18n-helpers" }
+voxygen-egui = { package = "veloren-voxygen-egui", path = "egui", optional = true }
+
+# Graphics
+winit = { version = "0.30.12", features = ["serde"] }
+wgpu = { version = "27", features = ["spirv", "glsl"] }
+wgpu-profiler = "0.25"
+bytemuck = { version = "1.7", features = ["derive"] }
+shaderc = "0.10"
+
+# Ui
+conrod_core = { git = "https://gitlab.com/veloren/conrod.git", branch = "copypasta_0.7" }
+euc = "0.5.3"
+# We should probably migrate to a more recent version at some point, but this is significant amount of work.
+# Note: this does not depend on the version of `winit` anymore, all dependent code was moved into Voxygen
+iced = { package = "iced_native", git = "https://github.com/Imberflur/iced", tag = "veloren-winit-0.28" }
+window_clipboard = "0.5"
+glyph_brush = "0.7.0"
+# EGUI
+egui = { version = "0.33", optional = true }
+egui-wgpu = { version = "0.33", optional = true }
+egui-winit = { version = "0.33", optional = true }
+
+# ECS
+specs = { workspace = true, features = ["serde", "storage-event-control"] }
+
+# Mathematics
+vek = { workspace = true }
+levenshtein = "1.0.5"
+
+# Controller
+gilrs = { version = "0.11.0", features = ["serde-serialize"] }
+
+# Singleplayer
+server = { package = "veloren-server", path = "../server", optional = true, default-features = false, features = [
+    "worldgen",
+] }
+
+# CLI
+clap = { workspace = true }
+
+# Utility
+backtrace = "0.3.40"
+chrono = { workspace = true }
+chumsky = "0.13"
+crossbeam-utils = { workspace = true }
+crossbeam-channel = { workspace = true }
+directories-next = "2.0"
+dot_vox = "5.1"
+guillotiere = "0.7.0"
+hashbrown = { workspace = true }
+image = { workspace = true, features = ["ico"] }
+kira = { version = "0.12", default-features = false, features = [
+    "cpal",
+    "symphonia",
+    "ogg",
+    "vorbis",
+] }
+lazy_static = { workspace = true }
+native-dialog = { version = "0.9.0", optional = true }
+num = { workspace = true }
+ordered-float = { workspace = true }
+regex = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rayon = { workspace = true }
+ron = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_with = { version = "3", features = ["hashbrown_0_17"] }
+slab = { workspace = true }
+strum = { workspace = true }
+tracing = { workspace = true }
+treeculler = "0.4"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+num_cpus = "1.0"
+inline_tweak = { workspace = true }
+itertools = { workspace = true }
+sha2 = { workspace = true }
+bitflags = { workspace = true, features = ["serde"] }
+open = "5.3.2"
+
+# Discord RPC
+discord-sdk = { version = "0.4", optional = true }
+enum-map = { workspace = true }
+cpal = "0.18"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch = "0.2"
+
+[target.'cfg(target_family = "windows")'.build-dependencies]
+winres = "0.1"
+
+[target.'cfg(target_family = "windows")'.dependencies]
+mimalloc = { workspace = true }
+
+# Mumble
+[target.'cfg(not(target_os="macos"))'.dependencies]
+mumble-link = "0.2.0"
+
+[dev-dependencies]
+criterion = { workspace = true }
+world = { package = "veloren-world", path = "../world" }
+rayon = { workspace = true }
+
+[[bench]]
+harness = false
+name = "meshing_benchmark"
+
+[[bin]]
+name = "img_export"
+required-features = []
+
+[[bin]]
+name = "cmd_doc_gen"
+required-features = ["bin_cmd_doc_gen"]

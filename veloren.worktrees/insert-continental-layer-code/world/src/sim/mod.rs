@@ -1110,19 +1110,30 @@ impl WorldSim {
             let nx = pos.x as f64 / (world_width - 1.0).max(1.0);
             let ny = pos.y as f64 / (world_height - 1.0).max(1.0);
 
-            // Three irregular landmasses with different proportions and
-            // spacing so they read as separate continents.
+            // Three irregular landmasses with different proportions,
+            // rotations, and vertical offsets. They are deliberately not
+            // arranged along one horizontal line.
             let continents = [
-                (0.17, 0.50, 0.15, 0.66),
-                (0.50, 0.45, 0.17, 0.72),
-                (0.83, 0.53, 0.15, 0.64),
+                // A tall, slightly tilted western continent.
+                (0.09, 0.25, 0.11, 0.32, -0.28, 0.0, 0.0),
+                // A broad, lower central continent, kept well away from the
+                // western and eastern shorelines.
+                (0.50, 0.73, 0.17, 0.18, 0.20, 1.7, 2.4),
+                // A tall, offset eastern continent with a stronger tilt.
+                (0.91, 0.24, 0.11, 0.31, 0.58, 3.9, 4.6),
             ];
 
             let mut continentalness = 0.0f64;
 
-            for &(cx, cy, rx, ry) in &continents {
-                let dx = (nx - cx) / rx;
-                let dy = (ny - cy) / ry;
+            for &(cx, cy, rx, ry, angle, noise_x, noise_y) in &continents {
+                let offset_x = nx - cx;
+                let offset_y = ny - cy;
+                let cos_angle = angle.cos();
+                let sin_angle = angle.sin();
+                let rotated_x = offset_x * cos_angle + offset_y * sin_angle;
+                let rotated_y = -offset_x * sin_angle + offset_y * cos_angle;
+                let dx = rotated_x / rx;
+                let dy = rotated_y / ry;
 
                 let distance = (dx * dx + dy * dy).sqrt();
 
@@ -1130,15 +1141,35 @@ impl WorldSim {
                 let mut shape = 1.0 - distance;
 
                 // Use the existing procedural terrain noise to make
-                // coastlines irregular instead of perfect ellipses.
-                let coast_noise = gen_ctx.small_nz.get([nx * 3.5, ny * 3.5]);
+                // coastlines irregular instead of perfect ellipses. Each
+                // continent samples a different offset so the silhouettes
+                // do not repeat.
+                let coast_noise = gen_ctx.small_nz.get([
+                    nx * 4.2 + noise_x,
+                    ny * 4.2 + noise_y,
+                ]);
+                let detail_noise = gen_ctx.small_nz.get([
+                    nx * 9.0 + noise_x * 0.7,
+                    ny * 9.0 + noise_y * 0.7,
+                ]);
 
-                shape += coast_noise * 0.16;
+                shape += coast_noise * 0.18 + detail_noise * 0.06;
 
                 shape = shape.clamp(0.0, 1.0);
 
                 continentalness = continentalness.max(shape);
             }
+
+            // Keep a continuous ocean rim around the world boundary. This
+            // prevents a continent from being cut off at the map edge and
+            // guarantees that each shoreline has open water beyond it.
+            let edge_distance = nx
+                .min(1.0 - nx)
+                .min(ny)
+                .min(1.0 - ny);
+            let edge_fade = (edge_distance / 0.08).clamp(0.0, 1.0);
+            let edge_fade = edge_fade * edge_fade * (3.0 - 2.0 * edge_fade);
+            continentalness *= edge_fade;
 
             // Smooth transition around the coastline.
             let land_factor = if continentalness <= 0.30 {

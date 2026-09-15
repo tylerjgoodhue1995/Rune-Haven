@@ -133,6 +133,8 @@ pub enum ClientGeneral {
     },
     RequestPropertyParcels,
     RequestPropertyPurchase { parcel_id: String },
+    RequestVgldAccount,
+    RequestVgldDeposit { transaction_id: String },
 
     SpectatePosition(Vec3<f32>),
     SpectateEntity(Option<common::uid::Uid>),
@@ -202,7 +204,9 @@ impl ClientMsg {
                         | ClientGeneral::LinkWallet { .. }
                         | ClientGeneral::RequestPropertyPlacement { .. }
                         | ClientGeneral::RequestPropertyParcels
-                        | ClientGeneral::RequestPropertyPurchase { .. } => {
+                        | ClientGeneral::RequestPropertyPurchase { .. }
+                        | ClientGeneral::RequestVgldAccount
+                        | ClientGeneral::RequestVgldDeposit { .. } => {
                             c_type == ClientType::Game && presence.is_some()
                         },
                         ClientGeneral::SpectatePosition(_) | ClientGeneral::SpectateEntity(_) => {

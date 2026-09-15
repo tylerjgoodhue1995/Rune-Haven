@@ -229,6 +229,7 @@ impl Client {
                     | ServerGeneral::PropertyPlacementResult { .. }
                     | ServerGeneral::PropertyParcels(_)
                     | ServerGeneral::PropertyPurchaseResult { .. }
+                    | ServerGeneral::VgldAccount { .. }
                     | ServerGeneral::SetPlayerRole(_)
                     | ServerGeneral::PluginData(_) => {
                         PreparedMsg::new(3, &g, &self.general_stream_params)

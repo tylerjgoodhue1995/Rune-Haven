@@ -27,6 +27,7 @@ mod pet;
 pub mod presence;
 pub mod property;
 pub mod rtsim;
+pub mod vgld;
 pub mod settings;
 pub mod state_ext;
 pub mod sys;
@@ -128,6 +129,7 @@ use crate::{
     persistence::{DatabaseSettings, SqlLogMode},
     property::PropertyRuntime,
     sys::terrain,
+    vgld::{VgldConfig, VgldLedger},
 };
 use hashbrown::HashMap;
 use std::sync::RwLock;
@@ -374,6 +376,10 @@ impl Server {
             .insert(PropertyRuntime::with_persistence_path(
                 data_dir.join("property_placements.json"),
             ));
+        state
+            .ecs_mut()
+            .insert(VgldLedger::with_persistence_path(data_dir.join("vgld_ledger.json")));
+        state.ecs_mut().insert(VgldConfig::from_env());
         state.ecs_mut().insert(settings.clone());
         state.ecs_mut().insert(editable_settings);
         state.ecs_mut().insert(DataDir {

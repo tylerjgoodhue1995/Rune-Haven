@@ -236,6 +236,12 @@ pub enum ServerGeneral {
         state: PropertyPurchaseState,
         message: String,
     },
+    VgldAccount {
+        wallet: Option<String>,
+        balance_base_units: u64,
+        decimals: u8,
+        status: String,
+    },
     UpdatePendingTrade(TradeId, PendingTrade, Option<SitePrices>),
     FinishedTrade(TradeResult),
     /// Economic information about sites
@@ -277,8 +283,15 @@ pub struct PropertyParcelInfo {
     pub continent: String,
     pub region: String,
     pub land_type: String,
+    pub rarity: String,
+    pub terrain_type: String,
+    pub water_access: bool,
+    pub road_access: bool,
     pub size_label: String,
     pub price_lamports: u64,
+    pub price_vgld_base_units: u64,
+    pub status: String,
+    pub protected: bool,
     pub is_owned: bool,
     pub min_x: i32,
     pub min_y: i32,
@@ -457,7 +470,8 @@ impl ServerMsg {
                         | ServerGeneral::WalletLinkResult { .. }
                         | ServerGeneral::PropertyPlacementResult { .. }
                         | ServerGeneral::PropertyParcels(_)
-                        | ServerGeneral::PropertyPurchaseResult { .. } => true,
+                        | ServerGeneral::PropertyPurchaseResult { .. }
+                        | ServerGeneral::VgldAccount { .. } => true,
                         ServerGeneral::PluginData(_) => true,
                     }
             },

@@ -1,0 +1,728 @@
+pub mod alpha;
+pub mod beam;
+pub mod block;
+pub mod buff;
+pub mod combomelee;
+pub mod dash;
+pub mod idle;
+pub mod leapmelee;
+pub mod rapidmelee;
+pub mod ripostemelee;
+pub mod run;
+pub mod shockwave;
+pub mod shoot;
+pub mod spritesummon;
+pub mod stunned;
+pub mod summon;
+pub mod wield;
+
+// Reexports
+pub use self::{
+    alpha::AlphaAnimation, beam::BeamAnimation, block::BlockAnimation, buff::BuffAnimation,
+    combomelee::ComboAnimation, dash::DashAnimation, idle::IdleAnimation, leapmelee::LeapAnimation,
+    rapidmelee::RapidMeleeAnimation, ripostemelee::RiposteMeleeAnimation, run::RunAnimation,
+    shockwave::ShockwaveAnimation, shoot::ShootAnimation, spritesummon::SpriteSummonAnimation,
+    stunned::StunnedAnimation, summon::SummonAnimation, wield::WieldAnimation,
+};
+
+use super::{FigureBoneData, Skeleton, vek::*};
+use common::comp::{self};
+use core::convert::TryFrom;
+use std::f32::consts::PI;
+
+pub type Body = comp::biped_small::Body;
+
+skeleton_impls!(struct BipedSmallSkeleton ComputedBipedSmallSkeleton {
+    + head
+    + chest
+    + pants
+    + tail
+    + main
+    + second
+    + hand_l
+    + hand_r
+    + foot_l
+    + foot_r
+    control
+    control_l
+    control_r
+    :: // Begin non-bone fields
+    // Allows right hand to not be moved by control bone
+    detach_right: bool,
+});
+
+impl Skeleton for BipedSmallSkeleton {
+    type Attr = SkeletonAttr;
+    type Body = Body;
+    type ComputedSkeleton = ComputedBipedSmallSkeleton;
+
+    const BONE_COUNT: usize = ComputedBipedSmallSkeleton::BONE_COUNT;
+    #[cfg(feature = "use-dyn-lib")]
+    const COMPUTE_FN: &'static [u8] = b"biped_small_compute_mats\0";
+
+    #[cfg_attr(
+        feature = "be-dyn-lib",
+        unsafe(export_name = "biped_small_compute_mats")
+    )]
+    fn compute_matrices_inner(
+        &self,
+        base_mat: Mat4<f32>,
+        buf: &mut [FigureBoneData; super::MAX_BONE_COUNT],
+        body: Self::Body,
+    ) -> Self::ComputedSkeleton {
+        let base_mat = base_mat * Mat4::scaling_3d(SkeletonAttr::from(&body).scaler / 11.0);
+
+        let chest_mat = base_mat * Mat4::<f32>::from(self.chest);
+        let pants_mat = chest_mat * Mat4::<f32>::from(self.pants);
+        let control_mat = chest_mat * Mat4::<f32>::from(self.control);
+        let control_l_mat = Mat4::<f32>::from(self.control_l);
+        let control_r_mat = Mat4::<f32>::from(self.control_r);
+        let head_mat = chest_mat * Mat4::<f32>::from(self.head);
+        let tail_mat = pants_mat * Mat4::<f32>::from(self.tail);
+
+        let computed_skeleton = ComputedBipedSmallSkeleton {
+            head: head_mat,
+            chest: chest_mat,
+            pants: pants_mat,
+            tail: tail_mat,
+            main: control_mat * Mat4::<f32>::from(self.main),
+            second: control_mat * control_r_mat * Mat4::<f32>::from(self.second),
+            hand_l: control_mat * control_l_mat * Mat4::<f32>::from(self.hand_l),
+            hand_r: if self.detach_right {
+                chest_mat
+            } else {
+                control_mat
+            } * control_r_mat
+                * Mat4::<f32>::from(self.hand_r),
+            foot_l: base_mat * Mat4::<f32>::from(self.foot_l),
+            foot_r: base_mat * Mat4::<f32>::from(self.foot_r),
+        };
+
+        computed_skeleton.set_figure_bone_data(buf);
+        computed_skeleton
+    }
+}
+
+pub struct SkeletonAttr {
+    head: (f32, f32),
+    chest: (f32, f32),
+    pants: (f32, f32),
+    tail: (f32, f32),
+    hand: (f32, f32, f32),
+    foot: (f32, f32, f32),
+    grip: (f32, f32, f32),
+    scaler: f32,
+    wing_for_foot: bool,
+}
+
+impl<'a> TryFrom<&'a comp::Body> for SkeletonAttr {
+    type Error = ();
+
+    fn try_from(body: &'a comp::Body) -> Result<Self, Self::Error> {
+        match body {
+            comp::Body::BipedSmall(body) => Ok(SkeletonAttr::from(body)),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Default for SkeletonAttr {
+    fn default() -> Self {
+        Self {
+            head: (0.0, 0.0),
+            chest: (0.0, 0.0),
+            pants: (0.0, 0.0),
+            tail: (0.0, 0.0),
+            hand: (0.0, 0.0, 0.0),
+            foot: (0.0, 0.0, 0.0),
+            grip: (0.0, 0.0, 0.0),
+            scaler: 0.0,
+            wing_for_foot: false,
+        }
+    }
+}
+
+impl<'a> From<&'a Body> for SkeletonAttr {
+    fn from(body: &'a Body) -> Self {
+        use comp::biped_small::Species::*;
+        Self {
+            head: match (body.species, body.body_type) {
+                (Gnome, _) => (-1.0, 9.0),
+                (Sahagin, _) => (7.0, -3.5),
+                (Adlet, _) => (0.0, 7.0),
+                (Gnarling, _) => (0.0, 6.0),
+                (Mandragora, _) => (-1.0, 9.0),
+                (Kappa, _) => (8.0, 3.5),
+                (Cactid, _) => (-1.0, 9.0),
+                (Gnoll, _) => (5.5, -1.0),
+                (Haniwa, _) => (0.0, 7.0),
+                (Myrmidon, _) => (0.0, 8.0),
+                (Husk, _) => (0.5, 8.5),
+                (Boreal, _) => (-0.5, 13.0),
+                (Ashen, _) => (-0.5, 13.0),
+                (Bushly, _) => (-1.0, 9.0),
+                (Irrwurz, _) => (-1.0, 9.0),
+                (IronDwarf, _) => (3.0, 3.5),
+                (Flamekeeper, _) => (3.0, 3.5),
+                (ShamanicSpirit, _) => (-0.5, 4.5),
+                (Jiangshi, _) => (-1.0, 6.5),
+                (TreasureEgg, _) => (-1.0, 9.0),
+                (GnarlingChieftain, _) => (0.0, 6.0),
+                (BloodmoonHeiress, _) => (0.0, 3.5),
+                (Bloodservant, _) => (-1.0, 6.5),
+                (Harlequin, _) => (0.0, 8.0),
+                (GoblinThug, _) => (-0.5, 3.5),
+                (GoblinChucker, _) => (-0.5, 3.5),
+                (GoblinRuffian, _) => (-0.5, 3.5),
+                (GreenLegoom, _) => (0.0, 3.5),
+                (OchreLegoom, _) => (0.0, 3.5),
+                (PurpleLegoom, _) => (-0.5, 3.5),
+                (RedLegoom, _) => (0.0, 3.5),
+                (UmberLegoom, _) => (0.0, 3.5),
+            },
+            chest: match (body.species, body.body_type) {
+                (Gnome, _) => (0.0, 9.0),
+                (Sahagin, _) => (0.0, 15.0),
+                (Adlet, _) => (0.0, 11.0),
+                (Gnarling, _) => (0.0, 7.5),
+                (Mandragora, _) => (0.0, 4.0),
+                (Kappa, _) => (0.0, 14.5),
+                (Cactid, _) => (0.0, 7.0),
+                (Gnoll, _) => (0.0, 15.5),
+                (Haniwa, _) => (0.0, 11.0),
+                (Myrmidon, _) => (0.0, 11.0),
+                (Husk, _) => (0.0, 13.0),
+                (Boreal, _) => (0.0, 12.0),
+                (Ashen, _) => (0.0, 14.5),
+                (Bushly, _) => (0.0, 4.0),
+                (Irrwurz, _) => (0.0, 6.0),
+                (IronDwarf, _) => (0.0, 14.0),
+                (Flamekeeper, _) => (0.0, 14.0),
+                (ShamanicSpirit, _) => (0.0, 14.5),
+                (Jiangshi, _) => (0.0, 14.0),
+                (TreasureEgg, _) => (0.0, 3.0),
+                (GnarlingChieftain, _) => (0.0, 7.5),
+                (BloodmoonHeiress, _) => (0.0, 21.0),
+                (Bloodservant, _) => (0.0, 14.0),
+                (Harlequin, _) => (0.0, 13.5),
+                (GoblinThug, _) => (0.0, 8.5),
+                (GoblinChucker, _) => (0.0, 8.5),
+                (GoblinRuffian, _) => (0.0, 8.5),
+                (GreenLegoom, _) => (0.0, 7.0),
+                (OchreLegoom, _) => (0.0, 7.0),
+                (PurpleLegoom, _) => (0.0, 7.5),
+                (RedLegoom, _) => (0.0, 7.0),
+                (UmberLegoom, _) => (0.0, 7.0),
+            },
+            pants: match (body.species, body.body_type) {
+                (Gnome, _) => (0.0, -3.0),
+                (Sahagin, _) => (0.5, -7.0),
+                (Adlet, _) => (0.0, -3.0),
+                (Gnarling, _) => (0.0, -3.0),
+                (Mandragora, _) => (0.0, 0.0),
+                (Kappa, _) => (0.0, -3.0),
+                (Cactid, _) => (0.0, -2.0),
+                (Gnoll, _) => (0.5, -7.5),
+                (Haniwa, _) => (0.0, -3.5),
+                (Myrmidon, _) => (0.0, -3.0),
+                (Husk, _) => (-1.0, -3.0),
+                (Boreal, _) => (1.5, -5.0),
+                (Ashen, _) => (1.5, -5.0),
+                (Bushly, _) => (0.0, 1.0),
+                (Irrwurz, _) => (-5.5, -0.5),
+                (IronDwarf, _) => (-1.0, -8.0),
+                (Flamekeeper, _) => (-1.0, -8.0),
+                (ShamanicSpirit, _) => (0.0, -8.0),
+                (Jiangshi, _) => (0.5, -6.0),
+                (TreasureEgg, _) => (0.0, 1.0),
+                (GnarlingChieftain, _) => (0.0, -3.0),
+                (BloodmoonHeiress, _) => (0.0, -8.0),
+                (Bloodservant, _) => (0.0, -6.0),
+                (Harlequin, _) => (0.0, -5.5),
+                (GoblinThug, _) => (0.0, -4.5),
+                (GoblinChucker, _) => (0.0, -4.5),
+                (GoblinRuffian, _) => (0.0, -4.5),
+                (GreenLegoom, _) => (0.0, -3.5),
+                (OchreLegoom, _) => (0.0, -3.5),
+                (PurpleLegoom, _) => (0.0, -4.0),
+                (RedLegoom, _) => (0.0, -3.5),
+                (UmberLegoom, _) => (0.0, -3.5),
+            },
+            tail: match (body.species, body.body_type) {
+                (Gnome, _) => (0.0, 0.0),
+                (Sahagin, _) => (-2.5, -2.0),
+                (Adlet, _) => (-4.5, -2.0),
+                (Gnarling, _) => (-2.0, 1.5),
+                (Mandragora, _) => (0.0, -1.0),
+                (Kappa, _) => (0.0, -4.0),
+                (Cactid, _) => (0.0, 0.0),
+                (Gnoll, _) => (-2.5, -2.0),
+                (Haniwa, _) => (-4.5, -2.0),
+                (Myrmidon, _) => (-2.5, -1.0),
+                (Husk, _) => (0.0, 0.0),
+                (Boreal, _) => (0.0, 0.0),
+                (Ashen, _) => (0.0, 0.0),
+                (Bushly, _) => (0.0, -1.0),
+                (Irrwurz, _) => (0.0, -1.0),
+                (IronDwarf, _) => (0.0, 0.0),
+                (Flamekeeper, _) => (0.0, 0.0),
+                (ShamanicSpirit, _) => (0.0, 0.0),
+                (Jiangshi, _) => (0.0, 0.0),
+                (TreasureEgg, _) => (0.0, 0.0),
+                (GnarlingChieftain, _) => (-2.0, 1.5),
+                (BloodmoonHeiress, _) => (0.0, 0.0),
+                (Bloodservant, _) => (0.0, 0.0),
+                (Harlequin, _) => (0.0, 0.0),
+                (GoblinThug, _) => (0.0, 0.0),
+                (GoblinChucker, _) => (0.0, 0.0),
+                (GoblinRuffian, _) => (0.0, 0.0),
+                (GreenLegoom, _) => (0.0, 0.0),
+                (OchreLegoom, _) => (0.0, 0.0),
+                (PurpleLegoom, _) => (0.0, 0.0),
+                (RedLegoom, _) => (0.0, 0.0),
+                (UmberLegoom, _) => (0.0, 0.0),
+            },
+            hand: match (body.species, body.body_type) {
+                (Gnome, _) => (4.0, 0.5, -1.0),
+                (Sahagin, _) => (3.5, 3.5, -2.0),
+                (Adlet, _) => (4.5, -0.5, 2.0),
+                (Gnarling, _) => (4.0, 0.0, 1.5),
+                (Mandragora, _) => (4.0, -0.5, 4.0),
+                (Kappa, _) => (4.0, 3.5, -0.5),
+                (Cactid, _) => (3.0, -0.5, 1.5),
+                (Gnoll, _) => (3.5, 0.5, -1.0),
+                (Haniwa, _) => (4.25, -1.0, 1.5),
+                (Myrmidon, _) => (3.5, 1.5, 2.0),
+                (Husk, _) => (4.0, 0.0, 1.0),
+                (Boreal, _) => (5.0, 0.5, 5.0),
+                (Ashen, _) => (6.0, 1.0, 2.0),
+                (Bushly, _) => (5.0, 2.0, 8.0),
+                (Irrwurz, _) => (3.5, 2.0, 3.0),
+                (IronDwarf, _) => (4.0, 1.5, -3.5),
+                (Flamekeeper, _) => (4.0, 1.5, -3.5),
+                (ShamanicSpirit, _) => (5.0, 0.0, 1.0),
+                (Jiangshi, _) => (5.0, -1.0, 3.0),
+                (TreasureEgg, _) => (5.0, 2.0, 5.0),
+                (GnarlingChieftain, _) => (4.0, 0.0, 1.5),
+                (BloodmoonHeiress, _) => (2.5, 2.5, 7.0),
+                (Bloodservant, _) => (5.0, -1.0, 2.0),
+                (Harlequin, _) => (5.0, 0.0, 2.5),
+                (GoblinThug, _) => (4.5, 0.0, 2.0),
+                (GoblinChucker, _) => (4.5, 0.0, 2.0),
+                (GoblinRuffian, _) => (4.5, 0.0, 2.0),
+                (GreenLegoom, _) => (3.0, 0.0, 1.5),
+                (OchreLegoom, _) => (3.0, 0.0, 1.5),
+                (PurpleLegoom, _) => (3.0, 0.0, 1.5),
+                (RedLegoom, _) => (3.0, 0.0, 1.5),
+                (UmberLegoom, _) => (3.0, 0.0, 1.5),
+            },
+            foot: match (body.species, body.body_type) {
+                (Gnome, _) => (3.0, 0.0, 4.0),
+                (Sahagin, _) => (3.0, 1.0, 8.0),
+                (Adlet, _) => (3.0, 0.5, 7.0),
+                (Gnarling, _) => (2.5, 1.0, 5.0),
+                (Mandragora, _) => (3.0, 0.0, 4.0),
+                (Kappa, _) => (3.0, 3.0, 9.0),
+                (Cactid, _) => (2.5, 0.0, 5.0),
+                (Gnoll, _) => (3.0, 1.0, 7.0),
+                (Haniwa, _) => (3.0, 0.5, 8.0),
+                (Myrmidon, _) => (3.0, 0.5, 7.0),
+                (Husk, _) => (4.0, 0.5, 7.0),
+                (Boreal, _) => (3.0, 0.0, 9.0),
+                (Ashen, _) => (3.0, 1.0, 9.0),
+                (Bushly, _) => (2.5, 0.0, 7.0),
+                (Irrwurz, _) => (4.0, 0.0, 6.0),
+                (IronDwarf, _) => (3.5, 3.0, 7.0),
+                (Flamekeeper, _) => (3.5, 3.0, 7.0),
+                (ShamanicSpirit, _) => (3.5, 3.0, 7.0),
+                (Jiangshi, _) => (3.0, 0.0, 8.0),
+                (TreasureEgg, _) => (2.0, 0.5, 4.0),
+                (GnarlingChieftain, _) => (2.5, 1.0, 5.0),
+                (BloodmoonHeiress, _) => (8.0, 0.5, 32.5),
+                (Bloodservant, _) => (2.5, 1.0, 7.0),
+                (Harlequin, _) => (2.5, 2.0, 10.0),
+                (GoblinThug, _) => (3.0, 0.5, 5.0),
+                (GoblinChucker, _) => (3.0, 0.5, 5.0),
+                (GoblinRuffian, _) => (3.0, 0.5, 5.0),
+                (GreenLegoom, _) => (2.0, -0.5, 4.0),
+                (OchreLegoom, _) => (2.0, -0.5, 4.0),
+                (PurpleLegoom, _) => (2.0, -0.5, 4.0),
+                (RedLegoom, _) => (2.0, -0.5, 4.0),
+                (UmberLegoom, _) => (2.0, -0.5, 4.0),
+            },
+            grip: match (body.species, body.body_type) {
+                (Gnome, _) => (0.0, 0.0, 5.0),
+                (Sahagin, _) => (1.0, 0.0, 13.0),
+                (Adlet, _) => (0.0, 0.0, 7.0),
+                (Gnarling, _) => (0.0, 0.0, 7.0),
+                (Mandragora, _) => (0.0, 0.0, 7.0),
+                (Kappa, _) => (0.75, 1.0, 12.0),
+                (Cactid, _) => (0.0, 0.0, 8.0),
+                (Gnoll, _) => (1.0, 0.0, 9.0),
+                (Haniwa, _) => (0.0, 0.5, 8.0),
+                (Myrmidon, _) => (0.0, 0.0, 8.0),
+                (Husk, _) => (0.0, 0.0, 8.0),
+                (Boreal, _) => (1.0, 0.0, 5.0),
+                (Ashen, _) => (-1.0, 0.0, 7.0),
+                (Bushly, _) => (0.0, 0.0, 7.0),
+                (Irrwurz, _) => (0.0, 0.0, 7.0),
+                (IronDwarf, _) => (0.0, 0.0, 8.0),
+                (Flamekeeper, _) => (0.0, 0.0, 8.0),
+                (ShamanicSpirit, _) => (0.0, 0.0, 8.0),
+                (Jiangshi, _) => (0.0, 0.0, 8.0),
+                (TreasureEgg, _) => (0.0, 0.0, 7.0),
+                (GnarlingChieftain, _) => (0.0, 0.0, 7.0),
+                (BloodmoonHeiress, _) => (0.0, 0.0, 8.0),
+                (Bloodservant, _) => (0.0, 0.0, 8.0),
+                (Harlequin, _) => (0.0, 0.0, 8.0),
+                (GoblinThug, _) => (0.0, 0.0, 8.0),
+                (GoblinChucker, _) => (0.0, 0.0, 8.0),
+                (GoblinRuffian, _) => (0.0, 0.0, 8.0),
+                (GreenLegoom, _) => (0.0, 0.0, 8.0),
+                (OchreLegoom, _) => (0.0, 0.0, 8.0),
+                (PurpleLegoom, _) => (0.0, 0.0, 8.0),
+                (RedLegoom, _) => (0.0, 0.0, 8.0),
+                (UmberLegoom, _) => (0.0, 0.0, 8.0),
+            },
+            scaler: match (body.species, body.body_type) {
+                (Gnome, _) => 0.8,
+                (Sahagin, _) => 1.05,
+                (Adlet, _) => 1.0,
+                (Gnarling, _) => 0.8,
+                (Mandragora, _) => 0.8,
+                (Kappa, _) => 0.8,
+                (Cactid, _) => 0.8,
+                (Gnoll, _) => 0.8,
+                (Haniwa, _) => 1.12,
+                (Myrmidon, _) => 1.24,
+                (Husk, _) => 1.12,
+                (Boreal, _) => 1.8,
+                (Ashen, _) => 1.0,
+                (Bushly, _) => 1.0,
+                (Irrwurz, _) => 1.0,
+                (IronDwarf, _) => 1.5,
+                (Flamekeeper, _) => 1.0,
+                (ShamanicSpirit, _) => 1.0,
+                (Jiangshi, _) => 1.0,
+                (TreasureEgg, _) => 1.0,
+                (GnarlingChieftain, _) => 0.8,
+                (BloodmoonHeiress, _) => 1.5,
+                (Bloodservant, _) => 1.0,
+                (Harlequin, _) => 1.0,
+                (GoblinThug, _) => 1.0,
+                (GoblinChucker, _) => 1.0,
+                (GoblinRuffian, _) => 1.0,
+                (GreenLegoom, _) => 0.65,
+                (OchreLegoom, _) => 0.65,
+                (PurpleLegoom, _) => 0.65,
+                (RedLegoom, _) => 0.65,
+                (UmberLegoom, _) => 0.65,
+            },
+            wing_for_foot: matches!((body.species, body.body_type), (BloodmoonHeiress, _)),
+        }
+    }
+}
+
+pub fn init_biped_small_alpha(next: &mut BipedSmallSkeleton, s_a: &SkeletonAttr) {
+    next.hand_l.position = Vec3::new(s_a.grip.0 * 4.0, 0.0, s_a.grip.2);
+    next.hand_r.position = Vec3::new(-s_a.grip.0 * 4.0, 0.0, s_a.grip.2);
+    next.main.position = Vec3::new(s_a.grip.0, 0.0, 0.0);
+    next.main.orientation = Quaternion::rotation_x(0.0);
+    next.second.position = Vec3::new(-s_a.grip.0, 0.0, 0.0);
+    next.second.orientation = Quaternion::rotation_x(0.0);
+    next.hand_l.orientation = Quaternion::rotation_x(0.0);
+    next.hand_r.orientation = Quaternion::rotation_x(0.0);
+}
+
+pub fn biped_small_alpha_spear(
+    next: &mut BipedSmallSkeleton,
+    s_a: &SkeletonAttr,
+    move1abs: f32,
+    move2abs: f32,
+    anim_time: f32,
+    speednormcancel: f32,
+) {
+    let fast = (anim_time * 10.0).sin();
+    let fastalt = (anim_time * 10.0 + PI / 2.0).sin();
+
+    next.head.position = Vec3::new(0.0, s_a.head.0, s_a.head.1);
+    next.head.orientation = Quaternion::rotation_x(move1abs * 0.2 + move2abs * 0.3)
+        * Quaternion::rotation_z(move1abs * -0.2 + move2abs * 0.6)
+        * Quaternion::rotation_y(move1abs * 0.3 + move2abs * -0.5);
+    next.chest.position = Vec3::new(0.0, s_a.chest.0, s_a.chest.1);
+    next.chest.orientation = Quaternion::rotation_x(move1abs * -0.2 + move2abs * 0.3)
+        * Quaternion::rotation_z(move1abs * 0.5 + move2abs * -0.6);
+
+    next.pants.position = Vec3::new(0.0, s_a.pants.0, s_a.pants.1);
+    next.pants.orientation = Quaternion::rotation_x(move1abs * 0.2 + move2abs * -0.3)
+        * Quaternion::rotation_z(move1abs * -0.2 + move2abs * 0.2);
+
+    next.control_l.position = Vec3::new(1.0 - s_a.grip.0 * 2.0, 2.0, -2.0);
+    next.control_r.position = Vec3::new(-1.0 + s_a.grip.0 * 2.0, 2.0, 2.0);
+
+    next.control.position = Vec3::new(
+        -3.0 + move1abs * -3.0 + move2abs * 5.0,
+        s_a.grip.2 + move1abs * -12.0 + move2abs * 17.0,
+        -s_a.grip.2 / 2.5 + s_a.grip.0 * -2.0 + move2abs * 5.0,
+    );
+
+    next.control_l.orientation =
+        Quaternion::rotation_x(PI / 1.5 + move1abs * -1.5 + move2abs * 2.5)
+            * Quaternion::rotation_y(-0.3);
+    next.control_r.orientation =
+        Quaternion::rotation_x(PI / 1.5 + s_a.grip.0 * 0.2 + move1abs * -1.5 + move2abs * 2.5)
+            * Quaternion::rotation_y(0.5 + s_a.grip.0 * 0.2);
+
+    next.control.orientation = Quaternion::rotation_x(-1.35 + move1abs * -0.3 + move2abs * 0.5)
+        * Quaternion::rotation_z(move1abs * 1.0 + move2abs * -1.0)
+        * Quaternion::rotation_y(move2abs * 0.0);
+
+    next.tail.position = Vec3::new(0.0, s_a.tail.0, s_a.tail.1);
+    next.tail.orientation = Quaternion::rotation_x(0.05 * fastalt * speednormcancel)
+        * Quaternion::rotation_z(fast * 0.15 * speednormcancel);
+}
+
+pub fn biped_small_alpha_axe(
+    next: &mut BipedSmallSkeleton,
+    s_a: &SkeletonAttr,
+    move1abs: f32,
+    move2abs: f32,
+) {
+    next.main.position = Vec3::new(2.0, 2.0, 0.0);
+    next.control_l.position = Vec3::new(2.0 - 2.0 * s_a.grip.0, 1.0, 3.0);
+    next.control_l.orientation = Quaternion::rotation_x(PI / 2.0);
+
+    next.head.orientation = Quaternion::rotation_z(0.3 * move1abs - 0.6 * move2abs);
+    next.chest.orientation = Quaternion::rotation_z(0.5 * move1abs - 1.2 * move2abs);
+    next.foot_l.orientation = Quaternion::rotation_z(0.5 * move1abs - 0.8 * move2abs);
+    next.foot_r.orientation = Quaternion::rotation_z(0.3 * move1abs - 0.6 * move2abs);
+
+    next.control.position = Vec3::new(
+        -5.0 + 5.0 * move1abs,
+        -1.0 + s_a.grip.2,
+        -1.0 + 3.0 * move1abs + -s_a.grip.2 / 2.5 - 2.0 * s_a.grip.0,
+    );
+    next.control.orientation = Quaternion::rotation_x(-0.3 - move2abs)
+        * Quaternion::rotation_y(-0.9 * move1abs + 1.0 * move2abs)
+        * Quaternion::rotation_z(-0.3);
+    next.control_r.position = Vec3::new(
+        9.0 - 5.0 * move1abs + 2.0 * s_a.grip.0,
+        -1.0 + 2.0 * move1abs,
+        3.0 * move1abs - 2.0,
+    );
+    next.control_r.orientation = Quaternion::rotation_x(0.5 + 1.5 * move1abs + 0.2 * s_a.grip.0)
+        * Quaternion::rotation_y(0.2 + 0.2 * s_a.grip.0);
+}
+
+pub fn biped_small_alpha_dagger(
+    next: &mut BipedSmallSkeleton,
+    s_a: &SkeletonAttr,
+    move1abs: f32,
+    move2abs: f32,
+) {
+    next.head.orientation = Quaternion::rotation_x(move1abs * 0.15 + move2abs * -0.15)
+        * Quaternion::rotation_z(move1abs * 0.15 + move2abs * -0.3);
+    next.control_l.position = Vec3::new(2.0 - s_a.grip.0 * 2.0, 1.0, 3.0);
+    next.control_r.position = Vec3::new(
+        9.0 + move1abs * -7.0 + s_a.grip.0 * 2.0,
+        -1.0 + move1abs * 6.0,
+        -2.0,
+    );
+    let z_offset = if s_a.wing_for_foot {
+        s_a.grip.2 / 3.0
+    } else {
+        -s_a.grip.2 / 2.5
+    };
+    next.control.position = Vec3::new(
+        -5.0 + move1abs * 5.0 + move2abs * 9.0,
+        -1.0 + move2abs * -3.0 + s_a.grip.2,
+        -1.0 + move1abs * 3.0 + z_offset + s_a.grip.0 * -2.0,
+    );
+
+    next.control_l.orientation = Quaternion::rotation_x(PI / 2.0)
+        * Quaternion::rotation_y(-0.0)
+        * Quaternion::rotation_z(-0.0);
+    next.control_r.orientation = Quaternion::rotation_x(0.5 + move1abs * 1.5 + s_a.grip.0 * 0.2)
+        * Quaternion::rotation_y(0.2 + s_a.grip.0 * 0.2)
+        * Quaternion::rotation_z(-0.0);
+
+    next.control.orientation = Quaternion::rotation_x(-0.3 + move2abs * -1.0)
+        * Quaternion::rotation_y(move1abs * -0.4 + move2abs * 1.0)
+        * Quaternion::rotation_z(-0.3 + move2abs * -2.2);
+}
+
+pub fn biped_small_wield_sword(
+    next: &mut BipedSmallSkeleton,
+    s_a: &SkeletonAttr,
+    speednorm: f32,
+    slow: f32,
+) {
+    next.control_l.position = Vec3::new(2.0 - s_a.grip.0 * 2.0, 1.0, 3.0);
+    next.control_r.position = Vec3::new(9.0 + s_a.grip.0 * 2.0, -1.0, -2.0 + speednorm * -3.0);
+    let z_offset = if s_a.wing_for_foot {
+        s_a.grip.2 / 3.0
+    } else {
+        -s_a.grip.2 / 2.5
+    };
+    next.control.position = Vec3::new(
+        -5.0,
+        -1.0 + s_a.grip.2,
+        -1.0 + z_offset + s_a.grip.0 * -2.0 + speednorm * 2.0,
+    );
+
+    next.control_l.orientation = Quaternion::rotation_x(PI / 2.0 + slow * 0.1)
+        * Quaternion::rotation_y(-0.0)
+        * Quaternion::rotation_z(-0.0);
+    next.control_r.orientation = Quaternion::rotation_x(0.5 + slow * 0.1 + s_a.grip.0 * 0.2)
+        * Quaternion::rotation_y(0.2 + slow * 0.0 + s_a.grip.0 * 0.2)
+        * Quaternion::rotation_z(-0.0);
+
+    next.control.orientation = Quaternion::rotation_x(-0.3 + 0.2 * speednorm)
+        * Quaternion::rotation_y(-0.2 * speednorm)
+        * Quaternion::rotation_z(-0.3);
+}
+
+pub fn biped_small_wield_spear(
+    next: &mut BipedSmallSkeleton,
+    s_a: &SkeletonAttr,
+    anim_time: f32,
+    speed: f32,
+    fastacc: f32,
+) {
+    let speednorm = speed / 9.4;
+    let speednormcancel = 1.0 - speednorm;
+    let fastalt = (anim_time * 10.0 + PI / 2.0).sin();
+    let slow = (anim_time * 2.0).sin();
+
+    next.control_l.position = Vec3::new(1.0 - s_a.grip.0 * 2.0, 2.0, -2.0);
+    next.control_r.position = Vec3::new(-1.0 + s_a.grip.0 * 2.0, 2.0, 2.0);
+
+    next.control.position = Vec3::new(
+        -3.0,
+        s_a.grip.2,
+        -s_a.grip.2 / 2.5
+            + s_a.grip.0 * -2.0
+            + fastacc * 1.5
+            + fastalt * 0.5 * speednormcancel
+            + speednorm * 2.0,
+    );
+
+    next.control_l.orientation =
+        Quaternion::rotation_x(PI / 1.5 + slow * 0.1) * Quaternion::rotation_y(-0.3);
+    next.control_r.orientation = Quaternion::rotation_x(PI / 1.5 + slow * 0.1 + s_a.grip.0 * 0.2)
+        * Quaternion::rotation_y(0.5 + slow * 0.0 + s_a.grip.0 * 0.2);
+
+    next.control.orientation = Quaternion::rotation_x(-1.35 + 0.5 * speednorm);
+}
+
+pub fn biped_small_wield_bow(
+    next: &mut BipedSmallSkeleton,
+    s_a: &SkeletonAttr,
+    anim_time: f32,
+    speed: f32,
+    fastacc: f32,
+) {
+    let speednorm = speed / 9.4;
+    let speednormcancel = 1.0 - speednorm;
+    let fastalt = (anim_time * 10.0 + PI / 2.0).sin();
+    let slow = (anim_time * 2.0).sin();
+
+    next.control_l.position = Vec3::new(-1.0 - s_a.grip.0 * 2.0, 0.0, 0.0);
+    next.control_r.position = Vec3::new(1.0 + s_a.grip.0 * 2.0, 3.0, -2.0);
+
+    next.control.position = Vec3::new(
+        -1.0,
+        2.0 + s_a.grip.2,
+        3.0 + -s_a.grip.2 / 2.5
+            + s_a.grip.0 * -2.0
+            + fastacc * 1.5
+            + fastalt * 0.5 * speednormcancel
+            + speednorm * 2.0,
+    );
+
+    next.control_l.orientation =
+        Quaternion::rotation_x(PI / 2.0 + slow * 0.1) * Quaternion::rotation_y(-0.3);
+    next.control_r.orientation = Quaternion::rotation_x(PI / 2.0 + slow * 0.1 + s_a.grip.0 * 0.2)
+        * Quaternion::rotation_y(0.5 + slow * 0.0 + s_a.grip.0 * 0.2);
+
+    next.control.orientation =
+        Quaternion::rotation_x(-0.3 + 0.5 * speednorm) * Quaternion::rotation_y(0.5 * speednorm);
+}
+
+pub fn mount_mat(
+    body: &Body,
+    computed_skeleton: &ComputedBipedSmallSkeleton,
+    skeleton: &BipedSmallSkeleton,
+) -> (Mat4<f32>, Quaternion<f32>) {
+    use comp::biped_small::Species::*;
+
+    match (body.species, body.body_type) {
+        (Sahagin | Mandragora | Kappa | Gnoll | Bushly | Irrwurz | TreasureEgg, _) => {
+            (computed_skeleton.chest, skeleton.chest.orientation)
+        },
+        (GoblinThug | GoblinChucker | GoblinRuffian, _) => (
+            computed_skeleton.chest,
+            skeleton.chest.orientation * Quaternion::rotation_x(0.7),
+        ),
+        (Myrmidon, _) => (
+            computed_skeleton.tail,
+            skeleton.chest.orientation * skeleton.pants.orientation * skeleton.tail.orientation,
+        ),
+        _ => (
+            computed_skeleton.head,
+            skeleton.chest.orientation * skeleton.head.orientation,
+        ),
+    }
+}
+
+pub fn mount_transform(
+    body: &Body,
+    computed_skeleton: &ComputedBipedSmallSkeleton,
+    skeleton: &BipedSmallSkeleton,
+) -> Transform<f32, f32, f32> {
+    use comp::biped_small::Species::*;
+
+    // TODO: Come up with a way to position rider
+    let mount_point = match (body.species, body.body_type) {
+        (Gnome, _) => (0.0, -4.0, -1.0),
+        (Sahagin, _) => (0.0, 0.0, 5.0),
+        (Adlet, _) => (0.0, -4.0, 1.0),
+        (Gnarling, _) => (0.0, -4.0, 1.5),
+        (Mandragora, _) => (0.0, -3.5, 6.0),
+        (Kappa, _) => (0.0, -5.0, 1.0),
+        (Cactid, _) => (0.0, -2.5, -0.5),
+        (Gnoll, _) => (0.0, -4.0, 2.0),
+        (Haniwa, _) => (0.0, -6.0, 1.0),
+        (Myrmidon, _) => (0.0, -5.5, 1.5),
+        (Husk, _) => (0.0, -5.5, 1.5),
+        (Boreal, _) => (0.0, -4.5, 2.0),
+        (Ashen, _) => (0.0, -4.5, 2.0),
+        (Bushly, _) => (0.0, -3.0, 16.0),
+        (Irrwurz, _) => (0.0, -4.0, 10.0),
+        (IronDwarf, _) => (0.0, -4.0, 4.5),
+        (Flamekeeper, _) => (0.0, -6.5, 7.0),
+        (ShamanicSpirit, _) => (0.0, 0.0, 6.5),
+        (Jiangshi, _) => (0.0, -1.5, 7.5),
+        (TreasureEgg, _) => (0.0, -3.5, 8.0),
+        (GnarlingChieftain, _) => (0.0, -4.0, 4.5),
+        (BloodmoonHeiress, _) => (0.0, -1.0, 14.0),
+        (Bloodservant, _) => (0.0, -1.5, 4.5),
+        (Harlequin, _) => (0.0, -3.0, 2.5),
+        (GoblinThug, _) => (0.0, -4.0, -3.0),
+        (GoblinChucker, _) => (0.0, -9.0, -3.0),
+        (GoblinRuffian, _) => (0.0, -4.0, -3.0),
+        (GreenLegoom, _) => (0.0, -4.5, 6.0),
+        (OchreLegoom, _) => (0.0, -4.5, 3.0),
+        (PurpleLegoom, _) => (0.0, -3.5, 7.5),
+        (RedLegoom, _) => (0.0, -3.5, 5.0),
+        (UmberLegoom, _) => (0.0, -3.5, 5.0),
+    }
+    .into();
+
+    let (mount_mat, orientation) = mount_mat(body, computed_skeleton, skeleton);
+    Transform {
+        position: mount_mat.mul_point(mount_point),
+        orientation,
+        scale: Vec3::one(),
+    }
+}

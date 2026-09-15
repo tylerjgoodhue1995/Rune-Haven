@@ -53,6 +53,15 @@ services:
       - VELOREN_AUTH_SERVER_URL=http://beta-auth:19253
       - VELOREN_SERVER_NAME=${VELOREN_SERVER_NAME:-Veloren Public Beta}
       - VELOREN_MAX_PLAYERS=${VELOREN_MAX_PLAYERS:-50}
+      - SOLANA_NETWORK=${SOLANA_NETWORK:-devnet}
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      - VGLD_MINT_ADDRESS=${VGLD_MINT_ADDRESS}
+      - VGLD_DECIMALS=${VGLD_DECIMALS:-9}
+      - VGLD_SYMBOL=${VGLD_SYMBOL:-VGLD}
+      - VGLD_NAME=${VGLD_NAME:-Veloren Gold}
+      - VELOREN_VGLD_NETWORK=${VELOREN_VGLD_NETWORK:-${SOLANA_NETWORK:-devnet}}
+      - VELOREN_VGLD_RPC_URL=${VELOREN_VGLD_RPC_URL:-${SOLANA_RPC_URL:-https://api.devnet.solana.com}}
+      - VELOREN_VGLD_MINT=${VELOREN_VGLD_MINT:-${VGLD_MINT_ADDRESS}}
     depends_on:
       - beta-auth
       - marketplace
