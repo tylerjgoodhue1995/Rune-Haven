@@ -132,9 +132,13 @@ pub enum ClientGeneral {
         y: i32,
     },
     RequestPropertyParcels,
-    RequestPropertyPurchase { parcel_id: String },
+    RequestPropertyPurchase {
+        parcel_id: String,
+    },
     RequestVgldAccount,
-    RequestVgldDeposit { transaction_id: String },
+    RequestVgldDeposit {
+        transaction_id: String,
+    },
 
     SpectatePosition(Vec3<f32>),
     SpectateEntity(Option<common::uid::Uid>),

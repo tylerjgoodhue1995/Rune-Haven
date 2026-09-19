@@ -1627,12 +1627,14 @@ impl Hud {
                 .color(TEXT_COLOR)
                 .set(self.ids.property_title, ui_widgets);
 
-            Text::new("Browse land, review its location, and manage properties linked to your wallet.")
-                .top_left_with_margins_on(self.ids.property_panel, 52.0, 22.0)
-                .font_id(self.fonts.cyri.conrod_id)
-                .font_size(self.fonts.cyri.scale(14))
-                .color(TEXT_COLOR_GREY)
-                .set(self.ids.property_subtitle, ui_widgets);
+            Text::new(
+                "Browse land, review its location, and manage properties linked to your wallet.",
+            )
+            .top_left_with_margins_on(self.ids.property_panel, 52.0, 22.0)
+            .font_id(self.fonts.cyri.conrod_id)
+            .font_size(self.fonts.cyri.scale(14))
+            .color(TEXT_COLOR_GREY)
+            .set(self.ids.property_subtitle, ui_widgets);
 
             let filters = ["ALL", "HOMESTEAD", "FARM", "RANCH"];
             let filter = filters[self.property_filter_index];
@@ -1640,17 +1642,24 @@ impl Hud {
                 .property_parcels
                 .iter()
                 .enumerate()
-                .filter(|(_, parcel)| filter == "ALL" || parcel.land_type.eq_ignore_ascii_case(filter))
+                .filter(|(_, parcel)| {
+                    filter == "ALL" || parcel.land_type.eq_ignore_ascii_case(filter)
+                })
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
-            visible_indices.sort_by_key(|index| self.property_parcels[*index].price_vgld_base_units);
+            visible_indices
+                .sort_by_key(|index| self.property_parcels[*index].price_vgld_base_units);
             if self.property_sort_high_to_low {
                 visible_indices.reverse();
             }
             let page_count = visible_indices.len().div_ceil(5);
             self.property_page = self.property_page.min(page_count.saturating_sub(1));
             let page_start = self.property_page * 5;
-            let page_indices = visible_indices.into_iter().skip(page_start).take(5).collect::<Vec<_>>();
+            let page_indices = visible_indices
+                .into_iter()
+                .skip(page_start)
+                .take(5)
+                .collect::<Vec<_>>();
 
             if Button::new()
                 .w_h(160.0, 28.0)
@@ -1716,7 +1725,11 @@ impl Hud {
                     )
                     .w_h(330.0, 58.0)
                     .label(&text)
-                    .color(if selected { UI_MAIN } else { Color::Rgba(0.08, 0.10, 0.12, 1.0) })
+                    .color(if selected {
+                        UI_MAIN
+                    } else {
+                        Color::Rgba(0.08, 0.10, 0.12, 1.0)
+                    })
                     .label_font_id(self.fonts.cyri.conrod_id)
                     .label_font_size(self.fonts.cyri.scale(15))
                     .label_color(if selected { BLACK } else { TEXT_COLOR })
@@ -1782,7 +1795,11 @@ impl Hud {
                         .join("  ")
                 };
                 let details = format!(
-                    "{}\n{}  •  {} land\n\nCONTINENT\n{}\n\nREGION\n{}\n\nWORLD LOCATION\n{} ({}, {}) to ({}, {})\n\nPARCEL SIZE\n{} x {} ({})\n\nBUILDING CAPACITY\n{} / {}  •  {} available\n\nRARITY / TERRAIN\n{} / {}\n\nFEATURES\n{}{}\n\nSTATUS\n{}\n\nPRICE\n{} VGLD\n\nALLOWED BUILDINGS\n{}\n\nPLACED BUILDINGS\n{}",
+                    "{}\n{}  •  {} land\n\nCONTINENT\n{}\n\nREGION\n{}\n\nWORLD LOCATION\n{} ({}, \
+                     {}) to ({}, {})\n\nPARCEL SIZE\n{} x {} ({})\n\nBUILDING CAPACITY\n{} / {}  \
+                     •  {} available\n\nRARITY / TERRAIN\n{} / \
+                     {}\n\nFEATURES\n{}{}\n\nSTATUS\n{}\n\nPRICE\n{} VGLD\n\nALLOWED \
+                     BUILDINGS\n{}\n\nPLACED BUILDINGS\n{}",
                     parcel.name,
                     parcel.land_type,
                     parcel.size_label,
@@ -1801,9 +1818,17 @@ impl Hud {
                     available_slots,
                     parcel.rarity,
                     parcel.terrain_type,
-                    if parcel.water_access { "Water access" } else { "" },
+                    if parcel.water_access {
+                        "Water access"
+                    } else {
+                        ""
+                    },
                     if parcel.road_access {
-                        if parcel.water_access { "  •  Road access" } else { "Road access" }
+                        if parcel.water_access {
+                            "  •  Road access"
+                        } else {
+                            "Road access"
+                        }
                     } else {
                         ""
                     },

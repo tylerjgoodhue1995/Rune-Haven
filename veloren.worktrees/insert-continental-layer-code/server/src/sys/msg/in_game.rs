@@ -98,8 +98,8 @@ impl Sys {
             },
             // Routed through the general stream; this arm keeps the in-game
             // protocol match exhaustive if the message is observed here.
-            ClientGeneral::RequestVgldAccount => {}
-            ClientGeneral::RequestVgldDeposit { .. } => {}
+            ClientGeneral::RequestVgldAccount => {},
+            ClientGeneral::RequestVgldDeposit { .. } => {},
             ClientGeneral::SetViewDistance(view_distances) => {
                 let clamped_vds = view_distances.clamp(settings.max_view_distance);
 

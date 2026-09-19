@@ -2,9 +2,12 @@ pub const VGLD_NAME: &str = "Veloren Gold";
 pub const VGLD_SYMBOL: &str = "VGLD";
 pub const VGLD_DECIMALS: u8 = 9;
 
-use std::collections::{HashMap, HashSet};
-use std::{fs, path::PathBuf};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerError {
@@ -38,9 +41,7 @@ impl VgldLedger {
         if path.exists() {
             match fs::read(&path)
                 .map_err(|_| ())
-                .and_then(|bytes| {
-                    serde_json::from_slice::<VgldLedger>(&bytes).map_err(|_| ())
-                })
+                .and_then(|bytes| serde_json::from_slice::<VgldLedger>(&bytes).map_err(|_| ()))
             {
                 Ok(mut loaded) => {
                     loaded.persistence_path = Some(path);
@@ -178,7 +179,10 @@ impl SolanaDepositVerifier {
             .get("result")
             .ok_or(LedgerError::DepositVerificationFailed)?;
         if result.is_null()
-            || result.get("meta").and_then(|meta| meta.get("err")).is_some_and(|err| !err.is_null())
+            || result
+                .get("meta")
+                .and_then(|meta| meta.get("err"))
+                .is_some_and(|err| !err.is_null())
             || result.get("meta").is_none()
         {
             return Err(LedgerError::DepositVerificationFailed);
@@ -226,7 +230,8 @@ impl SolanaDepositVerifier {
                     .ok_or(LedgerError::DepositVerificationFailed)?;
             } else if treasury.is_some_and(|owner| {
                 post.get("owner").and_then(serde_json::Value::as_str) == Some(owner)
-            }) && delta > 0 {
+            }) && delta > 0
+            {
                 received = received
                     .checked_add(delta as u64)
                     .ok_or(LedgerError::DepositVerificationFailed)?;
@@ -410,7 +415,9 @@ mod tests {
     #[test]
     fn ledger_credits_and_debits_base_units() {
         let mut ledger = VgldLedger::default();
-        ledger.credit("player-1", 1_500_000_000, "deposit-1").unwrap();
+        ledger
+            .credit("player-1", 1_500_000_000, "deposit-1")
+            .unwrap();
         ledger.debit("player-1", 500_000_000, "purchase-1").unwrap();
         assert_eq!(ledger.balance("player-1"), 1_000_000_000);
     }
@@ -427,10 +434,8 @@ mod tests {
 
     #[test]
     fn ledger_restores_balances_and_transaction_ids() {
-        let path = std::env::temp_dir().join(format!(
-            "veloren-vgld-test-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("veloren-vgld-test-{}.json", std::process::id()));
         let _ = fs::remove_file(&path);
 
         let mut ledger = VgldLedger::with_persistence_path(&path);
@@ -532,14 +537,7 @@ mod tests {
             mint: "mint-1".to_string(),
             amount: 2_000_000_000,
         };
-        apply_verified_deposit(
-            &mut ledger,
-            "player-1",
-            "wallet-1",
-            "mint-1",
-            deposit,
-        )
-        .unwrap();
+        apply_verified_deposit(&mut ledger, "player-1", "wallet-1", "mint-1", deposit).unwrap();
         assert_eq!(ledger.balance("player-1"), 2_000_000_000);
     }
 
@@ -570,7 +568,12 @@ mod tests {
             transaction_id: "withdrawal-1".to_string(),
         };
         assert_eq!(
-            apply_withdrawal(&mut ledger, &request, &TestAuthorizer { allowed: true }, false),
+            apply_withdrawal(
+                &mut ledger,
+                &request,
+                &TestAuthorizer { allowed: true },
+                false
+            ),
             Err(LedgerError::WithdrawalsDisabled)
         );
         assert_eq!(ledger.balance("player-1"), 100);
@@ -586,11 +589,21 @@ mod tests {
             amount: 50,
             transaction_id: "withdrawal-1".to_string(),
         };
-        apply_withdrawal(&mut ledger, &request, &TestAuthorizer { allowed: true }, true)
-            .unwrap();
+        apply_withdrawal(
+            &mut ledger,
+            &request,
+            &TestAuthorizer { allowed: true },
+            true,
+        )
+        .unwrap();
         assert_eq!(ledger.balance("player-1"), 50);
         assert_eq!(
-            apply_withdrawal(&mut ledger, &request, &TestAuthorizer { allowed: true }, true),
+            apply_withdrawal(
+                &mut ledger,
+                &request,
+                &TestAuthorizer { allowed: true },
+                true
+            ),
             Err(LedgerError::DuplicateTransaction)
         );
     }
@@ -606,7 +619,12 @@ mod tests {
             transaction_id: "withdrawal-1".to_string(),
         };
         assert_eq!(
-            apply_withdrawal(&mut ledger, &request, &TestAuthorizer { allowed: false }, true),
+            apply_withdrawal(
+                &mut ledger,
+                &request,
+                &TestAuthorizer { allowed: false },
+                true
+            ),
             Err(LedgerError::UnauthorizedWithdrawal)
         );
         assert_eq!(ledger.balance("player-1"), 100);

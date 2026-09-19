@@ -796,7 +796,9 @@ impl PlayerWalletRegistry {
     pub fn player_for_wallet(&self, wallet: &str) -> Option<&str> {
         self.linked_wallets
             .iter()
-            .find_map(|(player_id, linked_wallet)| (linked_wallet == wallet).then_some(player_id.as_str()))
+            .find_map(|(player_id, linked_wallet)| {
+                (linked_wallet == wallet).then_some(player_id.as_str())
+            })
     }
 }
 
@@ -821,7 +823,9 @@ impl PropertyRuntime<MockBlockchainProvider> {
         let mut runtime = Self::new();
         let path = path.into();
         runtime.service.set_persistence_path(path.clone());
-        runtime.service.load_or_generate_parcels(path.with_file_name("property_parcels.json"));
+        runtime
+            .service
+            .load_or_generate_parcels(path.with_file_name("property_parcels.json"));
         runtime.service.load_placements();
         runtime
     }
@@ -889,7 +893,12 @@ impl<P: BlockchainProvider> PropertyRuntime<P> {
     }
 
     pub fn sandbox_assign_land(&mut self, player_id: &str, land_nft_id: &str) -> bool {
-        let Some(wallet) = self.service.wallets.linked_wallet(player_id).map(str::to_owned) else {
+        let Some(wallet) = self
+            .service
+            .wallets
+            .linked_wallet(player_id)
+            .map(str::to_owned)
+        else {
             return false;
         };
         self.service.sandbox_assign_land(&wallet, land_nft_id)
@@ -916,11 +925,7 @@ impl<P: BlockchainProvider> PropertyRuntime<P> {
         self.service.building_type_for_placement(building_nft_id)
     }
 
-    pub fn reserve_purchase(
-        &mut self,
-        player_id: &str,
-        parcel_id: &str,
-    ) -> PropertyResult<u64> {
+    pub fn reserve_purchase(&mut self, player_id: &str, parcel_id: &str) -> PropertyResult<u64> {
         self.service.reserve_purchase(player_id, parcel_id)
     }
 
@@ -936,11 +941,7 @@ impl<P: BlockchainProvider> PropertyRuntime<P> {
         self.service.reserved_purchase_price(player_id, parcel_id)
     }
 
-    pub fn complete_sandbox_purchase(
-        &mut self,
-        player_id: &str,
-        parcel_id: &str,
-    ) -> bool {
+    pub fn complete_sandbox_purchase(&mut self, player_id: &str, parcel_id: &str) -> bool {
         self.service.complete_sandbox_purchase(player_id, parcel_id)
     }
 }
@@ -1140,11 +1141,7 @@ impl<P: BlockchainProvider> PropertyService<P> {
         self.parcels.insert(parcel.id.clone(), parcel);
     }
 
-    pub fn reserve_purchase(
-        &mut self,
-        player_id: &str,
-        parcel_id: &str,
-    ) -> PropertyResult<u64> {
+    pub fn reserve_purchase(&mut self, player_id: &str, parcel_id: &str) -> PropertyResult<u64> {
         self.reservations
             .retain(|_, (_, created)| created.elapsed() < Duration::from_secs(300));
         let parcel = self
@@ -1167,14 +1164,14 @@ impl<P: BlockchainProvider> PropertyService<P> {
         {
             return Err(PropertyError::LandOwnershipMissing);
         }
-        self.reservations
-            .insert(parcel_id.to_string(), (player_id.to_string(), Instant::now()));
+        self.reservations.insert(
+            parcel_id.to_string(),
+            (player_id.to_string(), Instant::now()),
+        );
         Ok(parcel.price_vgld_base_units)
     }
 
-    pub fn release_purchase(&mut self, parcel_id: &str) {
-        self.reservations.remove(parcel_id);
-    }
+    pub fn release_purchase(&mut self, parcel_id: &str) { self.reservations.remove(parcel_id); }
 
     pub fn reserved_purchase_price(
         &mut self,
@@ -1202,7 +1199,10 @@ impl<P: BlockchainProvider> PropertyService<P> {
         let Some(wallet) = self.wallets.linked_wallet(player_id).map(str::to_owned) else {
             return false;
         };
-        let Some(land_nft_id) = self.parcels.get(parcel_id).map(|parcel| parcel.land_nft_id.clone())
+        let Some(land_nft_id) = self
+            .parcels
+            .get(parcel_id)
+            .map(|parcel| parcel.land_nft_id.clone())
         else {
             return false;
         };
@@ -1233,8 +1233,8 @@ impl<P: BlockchainProvider> PropertyService<P> {
     }
 
     pub fn register_default_development_parcels(&mut self) {
-        let farm_land_nft_id = std::env::var("VELOREN_MARKETPLACE_LAND_MINT")
-            .unwrap_or_else(|_| "land-2".to_string());
+        let farm_land_nft_id =
+            std::env::var("VELOREN_MARKETPLACE_LAND_MINT").unwrap_or_else(|_| "land-2".to_string());
         for (id, min_x, min_y, max_x, max_y, reason) in [
             (
                 "PROTECTED-C1-CAPITAL",
@@ -1244,22 +1244,8 @@ impl<P: BlockchainProvider> PropertyService<P> {
                 -320,
                 "capital city",
             ),
-            (
-                "PROTECTED-C2-CAPITAL",
-                -160,
-                -160,
-                160,
-                160,
-                "capital city",
-            ),
-            (
-                "PROTECTED-C3-CAPITAL",
-                320,
-                320,
-                640,
-                640,
-                "capital city",
-            ),
+            ("PROTECTED-C2-CAPITAL", -160, -160, 160, 160, "capital city"),
+            ("PROTECTED-C3-CAPITAL", 320, 320, 640, 640, "capital city"),
         ] {
             self.register_protected_zone(ProtectedZone {
                 id: id.to_string(),
@@ -2080,8 +2066,7 @@ mod tests {
 
     #[test]
     fn property_service_reserves_available_parcel_once() {
-        let mut service =
-            PropertyService::new(Arc::new(MockBlockchainProvider::new()));
+        let mut service = PropertyService::new(Arc::new(MockBlockchainProvider::new()));
         service.register_parcel(PropertyParcel {
             id: "parcel-1".to_string(),
             land_nft_id: "land-1".to_string(),

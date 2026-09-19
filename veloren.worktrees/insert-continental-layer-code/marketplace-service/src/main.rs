@@ -20,7 +20,6 @@ use solana_sdk::{
 };
 use spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 use spl_token::instruction::transfer_checked;
-use tower_http::cors::CorsLayer;
 use std::{
     collections::HashMap,
     env,
@@ -29,6 +28,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::time::{Duration, sleep};
+use tower_http::cors::CorsLayer;
 
 #[derive(Clone, Serialize)]
 struct Listing {
@@ -76,9 +76,7 @@ struct ConfirmResponse {
 struct ApiError(String);
 
 impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, self.0).into_response()
-    }
+    fn into_response(self) -> Response { (StatusCode::BAD_REQUEST, self.0).into_response() }
 }
 
 fn parse_pubkey(value: &str, field: &str) -> Result<Pubkey, ApiError> {
@@ -117,7 +115,15 @@ fn listing_from_env() -> Result<Listing> {
 }
 
 async fn list_listings(State(state): State<AppState>) -> Json<Vec<Listing>> {
-    Json(state.listings.read().expect("listing lock poisoned").values().cloned().collect())
+    Json(
+        state
+            .listings
+            .read()
+            .expect("listing lock poisoned")
+            .values()
+            .cloned()
+            .collect(),
+    )
 }
 
 async fn purchase(
@@ -135,15 +141,16 @@ async fn purchase(
     let buyer = parse_pubkey(&request.buyer, "buyer")?;
     let seller = parse_pubkey(&listing.seller, "seller")?;
     if seller != state.seller.pubkey() {
-        return Err(ApiError("configured seller does not own this listing".to_string()));
+        return Err(ApiError(
+            "configured seller does not own this listing".to_string(),
+        ));
     }
     if buyer == seller {
         return Err(ApiError("buyer already owns this listing".to_string()));
     }
 
     let mint = parse_pubkey(&listing.mint, "land mint")?;
-    let seller_ata =
-        spl_associated_token_account::get_associated_token_address(&seller, &mint);
+    let seller_ata = spl_associated_token_account::get_associated_token_address(&seller, &mint);
     let buyer_ata = spl_associated_token_account::get_associated_token_address(&buyer, &mint);
     let seller_balance = state
         .rpc
@@ -180,7 +187,8 @@ async fn purchase(
     ];
     let message = Message::new(&instructions, Some(&buyer));
     let mut transaction = Transaction::new_unsigned(message);
-    transaction.try_partial_sign(&[state.seller.as_ref()], blockhash)
+    transaction
+        .try_partial_sign(&[state.seller.as_ref()], blockhash)
         .map_err(|error| ApiError(format!("could not sign marketplace transaction: {error}")))?;
     let serialized = bincode::serialize(&transaction)
         .map_err(|error| ApiError(format!("could not serialize transaction: {error}")))?;
@@ -220,7 +228,9 @@ async fn confirm(
             },
             Ok(None) => sleep(Duration::from_millis(500)).await,
             Err(error) => {
-                return Err(ApiError(format!("could not query transaction status: {error}")));
+                return Err(ApiError(format!(
+                    "could not query transaction status: {error}"
+                )));
             },
         }
     }
@@ -263,14 +273,23 @@ async fn main() -> Result<()> {
     let seller = Arc::new(seller_keypair()?);
     let listing = listing_from_env()?;
     if listing.seller != seller.pubkey().to_string() {
-        return Err(anyhow!("VELOREN_MARKETPLACE_SELLER must match the configured keypair"));
+        return Err(anyhow!(
+            "VELOREN_MARKETPLACE_SELLER must match the configured keypair"
+        ));
     }
     let rpc = Arc::new(RpcClient::new_with_commitment(
         rpc_url,
         CommitmentConfig::confirmed(),
     ));
-    let listings = Arc::new(RwLock::new(HashMap::from([(listing.parcel_id.clone(), listing)])));
-    let state = AppState { rpc, seller, listings };
+    let listings = Arc::new(RwLock::new(HashMap::from([(
+        listing.parcel_id.clone(),
+        listing,
+    )])));
+    let state = AppState {
+        rpc,
+        seller,
+        listings,
+    };
     let app = Router::new()
         .route("/marketplace/listings", get(list_listings))
         .route("/marketplace/{parcel_id}/purchase", post(purchase))

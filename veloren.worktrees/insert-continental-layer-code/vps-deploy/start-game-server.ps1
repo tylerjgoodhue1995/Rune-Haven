@@ -1,5 +1,9 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+$assetRoot = (Resolve-Path .\assets).Path
+$env:VELOREN_ASSETS = $assetRoot
+
 Get-Content .\.env | ForEach-Object {
     if ($_ -match '^\s*([^#][^=]*)=(.*)$') {
         [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), "Process")

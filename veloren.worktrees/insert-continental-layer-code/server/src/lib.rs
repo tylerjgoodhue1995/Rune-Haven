@@ -27,13 +27,13 @@ mod pet;
 pub mod presence;
 pub mod property;
 pub mod rtsim;
-pub mod vgld;
 pub mod settings;
 pub mod state_ext;
 pub mod sys;
 #[cfg(feature = "persistent_world")]
 pub mod terrain_persistence;
 #[cfg(not(feature = "worldgen"))] mod test_world;
+pub mod vgld;
 
 #[cfg(feature = "worldgen")] mod weather;
 
@@ -314,8 +314,8 @@ impl Server {
                 world_file: if let Some(ref opts) = settings.map_file {
                     opts.clone()
                 } else {
-                    // Load default map from assets.
-                    FileOpts::LoadAsset(DEFAULT_WORLD_MAP.into())
+                    // Generate the configured geography when no map override is provided.
+                    FileOpts::Generate(GenOpts::default())
                 },
                 calendar: Some(settings.calendar_mode.calendar_now()),
             },
@@ -376,9 +376,9 @@ impl Server {
             .insert(PropertyRuntime::with_persistence_path(
                 data_dir.join("property_placements.json"),
             ));
-        state
-            .ecs_mut()
-            .insert(VgldLedger::with_persistence_path(data_dir.join("vgld_ledger.json")));
+        state.ecs_mut().insert(VgldLedger::with_persistence_path(
+            data_dir.join("vgld_ledger.json"),
+        ));
         state.ecs_mut().insert(VgldConfig::from_env());
         state.ecs_mut().insert(settings.clone());
         state.ecs_mut().insert(editable_settings);

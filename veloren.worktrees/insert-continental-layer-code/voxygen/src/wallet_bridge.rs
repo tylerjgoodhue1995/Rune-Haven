@@ -70,7 +70,7 @@ impl WalletBridge {
             .map_err(|error| format!("could not start wallet callback thread: {error}"))?;
 
         let url = format!(
-            "http://{CALLBACK_ADDR}/?challenge={}",
+            "http://localhost:38291/?challenge={}",
             percent_encode(&challenge)
         );
         open::that_detached(url)
@@ -132,7 +132,9 @@ impl VgldBridge {
 impl PurchaseBridge {
     pub fn start(parcel_id: &str, api_url: &str) -> Result<Self, String> {
         let listener = TcpListener::bind(PURCHASE_CALLBACK_ADDR).map_err(|error| {
-            format!("could not start purchase callback listener on {PURCHASE_CALLBACK_ADDR}: {error}")
+            format!(
+                "could not start purchase callback listener on {PURCHASE_CALLBACK_ADDR}: {error}"
+            )
         })?;
         let (sender, receiver) = mpsc::channel();
         let parcel_id = parcel_id.to_string();
@@ -209,7 +211,11 @@ fn handle_purchase_callback(
     let headers = String::from_utf8(request[..header_end].to_vec())
         .map_err(|error| format!("purchase callback headers were not UTF-8: {error}"))?;
     let body_start = header_end + 4;
-    let mut request_line = headers.lines().next().unwrap_or_default().split_whitespace();
+    let mut request_line = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
     let method = request_line.next().unwrap_or_default();
     let target = request_line.next().unwrap_or_default();
     if method == "GET" {
@@ -243,14 +249,27 @@ fn handle_vgld_callback(stream: &mut TcpStream) -> Result<Option<VgldDeposit>, S
     let headers = String::from_utf8(request[..header_end].to_vec())
         .map_err(|error| format!("VGLD callback headers were not UTF-8: {error}"))?;
     let body_start = header_end + 4;
-    let mut request_line = headers.lines().next().unwrap_or_default().split_whitespace();
+    let mut request_line = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
     let method = request_line.next().unwrap_or_default();
     let target = request_line.next().unwrap_or_default();
     if method == "GET" {
         let page = VGLD_HTML
-            .replace("__VELOREN_AMOUNT__", &query_parameter(target, "amount").unwrap_or_default())
-            .replace("__VELOREN_MINT__", &query_parameter(target, "mint").unwrap_or_default())
-            .replace("__VELOREN_TREASURY__", &query_parameter(target, "treasury").unwrap_or_default());
+            .replace(
+                "__VELOREN_AMOUNT__",
+                &query_parameter(target, "amount").unwrap_or_default(),
+            )
+            .replace(
+                "__VELOREN_MINT__",
+                &query_parameter(target, "mint").unwrap_or_default(),
+            )
+            .replace(
+                "__VELOREN_TREASURY__",
+                &query_parameter(target, "treasury").unwrap_or_default(),
+            );
         write_html(stream, &page)?;
         return Ok(None);
     }
@@ -324,7 +343,9 @@ fn write_html(stream: &mut TcpStream, page: &str) -> Result<(), String> {
         page.len(),
         page
     );
-    stream.write_all(response.as_bytes()).map_err(|error| error.to_string())
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), String> {
@@ -335,7 +356,9 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> Result<(),
         body.len(),
         body
     );
-    stream.write_all(response.as_bytes()).map_err(|error| error.to_string())
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 fn percent_encode(value: &str) -> String {
@@ -351,12 +374,8 @@ fn percent_encode(value: &str) -> String {
 }
 
 fn query_parameter<'a>(target: &'a str, name: &str) -> Option<&'a str> {
-    target
-        .split_once('?')?
-        .1
-        .split('&')
-        .find_map(|parameter| {
-            let (key, value) = parameter.split_once('=')?;
-            (key == name).then_some(value)
-        })
+    target.split_once('?')?.1.split('&').find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        (key == name).then_some(value)
+    })
 }

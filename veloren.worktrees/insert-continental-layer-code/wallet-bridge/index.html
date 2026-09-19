@@ -73,7 +73,7 @@
 <script>
   const params = new URLSearchParams(location.search);
   const challenge = params.get("challenge") || "__VELOREN_CHALLENGE__";
-  const callback = "http://127.0.0.1:38291/callback";
+  const callback = "http://localhost:38291/callback";
   const status = document.getElementById("status");
 
   const button = document.getElementById("connect");
@@ -82,7 +82,8 @@
       status.textContent = "Missing challenge.";
       return;
     }
-    if (!window.solana?.isPhantom) {
+    const provider = window.phantom?.solana || window.solana;
+    if (!provider?.isPhantom) {
       status.textContent = "Phantom was not detected. Install and unlock the Phantom extension, then reload this page.";
       return;
     }
@@ -90,11 +91,19 @@
       button.disabled = true;
       button.textContent = "Connecting to Phantom...";
       status.textContent = "Waiting for wallet approval...";
-      const { publicKey } = await window.solana.connect();
+      const { publicKey } = await provider.connect({ onlyIfTrusted: false });
       const message =
         `Veloren wallet link\nWallet: ${publicKey.toString()}\nChallenge: ${challenge}`;
       const encoded = new TextEncoder().encode(message);
-      const signed = await window.solana.signMessage(encoded, "utf8");
+      let signed;
+      try {
+        signed = await provider.signMessage(encoded, "utf8");
+      } catch (signError) {
+        signed = await provider.request({
+          method: "signMessage",
+          params: { message: encoded, display: "hex" }
+        });
+      }
       const response = await fetch(callback, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -108,7 +117,10 @@
       button.textContent = "Wallet connected";
       status.textContent = "Wallet linked successfully. You can close this tab.";
     } catch (error) {
-      status.textContent = `Wallet link failed: ${error.message}`;
+      const detail = error && typeof error === "object"
+        ? [error.code, error.message].filter(Boolean).join(": ")
+        : String(error);
+      status.textContent = `Wallet link failed: ${detail || "Unknown wallet error"}`;
       button.disabled = false;
       button.textContent = "Try again";
     }

@@ -1414,9 +1414,7 @@ impl Client {
         self.send_msg(ClientGeneral::RequestPropertyPurchase { parcel_id });
     }
 
-    pub fn request_vgld_account(&mut self) {
-        self.send_msg(ClientGeneral::RequestVgldAccount);
-    }
+    pub fn request_vgld_account(&mut self) { self.send_msg(ClientGeneral::RequestVgldAccount); }
 
     pub fn request_vgld_deposit(&mut self, transaction_id: String) {
         self.send_msg(ClientGeneral::RequestVgldDeposit { transaction_id });

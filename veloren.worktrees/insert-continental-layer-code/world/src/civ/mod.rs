@@ -248,7 +248,10 @@ impl Civs {
             this.name_biomes(&mut name_ctx);
         }
 
-        let initial_civ_count = initial_civ_count(sim.map_size_lg());
+        // The macro world has three player-facing capitals. Keep the normal
+        // site pass for non-economic points of interest, but do not scatter
+        // additional towns across the continents.
+        let initial_civ_count = 3;
         let mut ctx = GenCtx { sim, rng };
 
         // info!("starting cave generation");
@@ -259,13 +262,30 @@ impl Civs {
         for i in 0..initial_civ_count {
             prof_span!("create civ");
             debug!("Creating civilisation...");
-            if this.birth_civ(&mut ctx.reseed()).is_none() {
+            if this.birth_civ(&mut ctx.reseed(), i).is_none() {
                 warn!("Failed to find starting site for civilisation.");
             }
             report_stage(WorldCivStage::CivCreation(i, initial_civ_count));
         }
         drop(guard);
         info!(?initial_civ_count, "all civilisations created");
+
+        let capital_centers = this
+            .civs
+            .values()
+            .map(|civ| this.sites[civ.capital].center)
+            .collect::<Vec<_>>();
+        for center in capital_centers {
+            let citadel_center = center + Vec2::new(24, 0);
+            if ctx.sim.get(citadel_center).is_some() {
+                this.establish_site(&mut ctx.reseed(), citadel_center, |place| Site {
+                    kind: SiteKind::Citadel,
+                    center: citadel_center,
+                    place,
+                    site_tmp: None,
+                });
+            }
+        }
 
         report_stage(WorldCivStage::SiteGeneration);
         prof_span!(guard, "find locations and establish sites");
@@ -489,7 +509,7 @@ impl Civs {
                 };
                 match &sim_site.kind {
                     SiteKind::Refactor => {
-                        let size = Lerp::lerp(0.03, 1.0, rng.random_range(0.0..1f32).powi(5));
+                        let size = 1.0;
                         WorldSite::generate_city(
                             &Land::from_sim(ctx.sim),
                             index_ref,
@@ -680,6 +700,17 @@ impl Civs {
 
         prof_span!(guard, "generate airship routes");
         this.airships.generate_airship_routes(ctx.sim, index);
+        info!(
+            capital_count = this.civs.values().count(),
+            citadel_count = this
+                .sites
+                .values()
+                .filter(|site| site.kind == SiteKind::Citadel)
+                .count(),
+            airship_dock_count = this.airships.airship_docks.len(),
+            airship_route_count = this.airships.routes.len(),
+            "Generated capital transport network"
+        );
         drop(guard);
 
         // TODO: this looks optimizable
@@ -786,18 +817,19 @@ impl Civs {
         astar.poll(100, heuristic, neighbors, satisfied).into_path()
     }
 
-    fn birth_civ(&mut self, ctx: &mut GenCtx<impl Rng>) -> Option<Id<Civ>> {
-        // TODO: specify SiteKind based on where a suitable location is found
-        let kind = match ctx.rng.random_range(0..64) {
-            0..=8 => SiteKind::CliffTown,
-            9..=17 => SiteKind::DesertCity,
-            18..=23 => SiteKind::SavannahTown,
-            24..=33 => SiteKind::CoastalTown,
-            _ => SiteKind::Refactor,
+    fn birth_civ(&mut self, ctx: &mut GenCtx<impl Rng>, capital_index: u32) -> Option<Id<Civ>> {
+        let (target, kind) = match capital_index {
+            0 => (Vec2::new(0.20, 0.25), SiteKind::CliffTown),
+            1 => (Vec2::new(0.50, 0.72), SiteKind::DesertCity),
+            _ => (Vec2::new(0.80, 0.25), SiteKind::Refactor),
         };
         let world_dims = ctx.sim.get_aabr();
+        let target = world_dims.min
+            + (world_dims.max - world_dims.min)
+                .map2(target, |value, fraction| (value as f32 * fraction).round() as i32);
         let avoid_town_enemies = ProximityRequirementsBuilder::new()
             .avoid_all_of(self.town_enemies(), 60)
+            .close_to_one_of(std::iter::once(target), 128)
             .finalize(&world_dims);
         let loc = (0..100)
             .flat_map(|_| {

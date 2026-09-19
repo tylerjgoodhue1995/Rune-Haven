@@ -7,8 +7,8 @@ pub enum RenderError {
     CustomError(String),
     CouldNotFindAdapter,
     RequestAdapterError(wgpu::RequestAdapterError),
-    ErrorInitializingShaderCCompiler(shaderc::Error),
-    ShaderShaderCError(String, shaderc::Error),
+    // ErrorInitializingShaderCCompiler(shaderc::Error),
+    // ShaderShaderCError(String, shaderc::Error),
     ShaderWgpuError(String, wgpu::Error),
 }
 
@@ -32,15 +32,15 @@ impl fmt::Debug for RenderError {
                 // Use Display formatting for this error since they have nice descriptions
                 .field(&err.to_string())
                 .finish(),
-            Self::ErrorInitializingShaderCCompiler(err) => f
-                .debug_tuple("ErrorInitializingShaderCCompiler")
-                .field(err)
-                .finish(),
-            Self::ShaderShaderCError(shader_name, err) => write!(
-                f,
-                "\"{shader_name}\" shader failed to compile with shaderc due to the following \
-                 error: {err}",
-            ),
+            // Self::ErrorInitializingShaderCCompiler(err) => f
+            //     .debug_tuple("ErrorInitializingShaderCCompiler")
+            //     .field(err)
+            //     .finish(),
+            // Self::ShaderShaderCError(shader_name, err) => write!(
+            //     f,
+            //     "\"{shader_name}\" shader failed to compile with shaderc due to the following \
+            //      error: {err}",
+            // ),
             Self::ShaderWgpuError(shader_name, err) => write!(
                 f,
                 "\"{shader_name}\" shader failed to compile with wgpu due to the following error: \
@@ -66,12 +66,12 @@ impl From<wgpu::RequestAdapterError> for RenderError {
     fn from(err: wgpu::RequestAdapterError) -> Self { Self::RequestAdapterError(err) }
 }
 
-impl From<shaderc::Error> for RenderError {
-    fn from(err: shaderc::Error) -> Self { Self::ErrorInitializingShaderCCompiler(err) }
-}
-
-impl From<(&str, shaderc::Error)> for RenderError {
-    fn from((shader_name, err): (&str, shaderc::Error)) -> Self {
-        Self::ShaderShaderCError(shader_name.into(), err)
-    }
-}
+// impl From<shaderc::Error> for RenderError {
+//     fn from(err: shaderc::Error) -> Self { Self::ErrorInitializingShaderCCompiler(err) }
+// }
+//
+// impl From<(&str, shaderc::Error)> for RenderError {
+//     fn from((shader_name, err): (&str, shaderc::Error)) -> Self {
+//         Self::ShaderShaderCError(shader_name.into(), err)
+//     }
+// }

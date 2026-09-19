@@ -15,8 +15,7 @@ pub use self::{
     server::{
         CharacterInfo, ChatTypeContext, DisconnectReason, InviteAnswer, Notification, PlayerInfo,
         PlayerListUpdate, PropertyParcelInfo, PropertyPlacementLocation, PropertyPurchaseState,
-        RegisterError,
-        SerializedTerrainChunk, ServerGeneral, ServerInfo, ServerInit, ServerMsg,
+        RegisterError, SerializedTerrainChunk, ServerGeneral, ServerInfo, ServerInit, ServerMsg,
         ServerRegisterAnswer,
     },
     world_msg::WorldMapMsg,

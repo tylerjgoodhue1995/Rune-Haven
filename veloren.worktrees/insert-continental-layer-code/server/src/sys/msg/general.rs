@@ -1,7 +1,9 @@
 use crate::{
     client::Client,
     property::PropertyRuntime,
-    vgld::{DepositVerifier, SolanaDepositVerifier, VgldConfig, VgldLedger, apply_verified_deposit},
+    vgld::{
+        DepositVerifier, SolanaDepositVerifier, VgldConfig, VgldLedger, apply_verified_deposit,
+    },
 };
 use common::{
     comp::{ChatMode, ChatType, Content, Group, Player},
@@ -48,9 +50,7 @@ impl Sys {
                         property_runtime.parcel_infos_for_player(&player.uuid().to_string())
                     })
                     .unwrap_or_default();
-                client.send(ServerGeneral::PropertyParcels(
-                    parcels,
-                ))?;
+                client.send(ServerGeneral::PropertyParcels(parcels))?;
             },
             ClientGeneral::RequestPropertyPurchase { parcel_id } => {
                 let Some(player) = player else {
@@ -59,8 +59,7 @@ impl Sys {
                 };
 
                 let player_id = player.uuid().to_string();
-                let reservation_price = property_runtime
-                    .reserve_purchase(&player_id, &parcel_id);
+                let reservation_price = property_runtime.reserve_purchase(&player_id, &parcel_id);
                 if let Ok(price) = reservation_price {
                     if vgld_ledger.balance(&player_id) < price {
                         property_runtime.release_purchase(&parcel_id);
@@ -94,7 +93,9 @@ impl Sys {
                             client.send(ServerGeneral::PropertyPurchaseResult {
                                 parcel_id,
                                 state: PropertyPurchaseState::Owned,
-                                message: "Test-mode purchase complete. VGLD was debited from the server ledger; no blockchain transaction was created.".to_string(),
+                                message: "Test-mode purchase complete. VGLD was debited from the \
+                                          server ledger; no blockchain transaction was created."
+                                    .to_string(),
                             })?;
                             return Ok(());
                         }
@@ -106,14 +107,18 @@ impl Sys {
                         client.send(ServerGeneral::PropertyPurchaseResult {
                             parcel_id,
                             state: PropertyPurchaseState::Failed,
-                            message: "Test-mode purchase could not assign the development land NFT; the VGLD debit was refunded.".to_string(),
+                            message: "Test-mode purchase could not assign the development land \
+                                      NFT; the VGLD debit was refunded."
+                                .to_string(),
                         })?;
                         return Ok(());
                     }
                     client.send(ServerGeneral::PropertyPurchaseResult {
                         parcel_id,
                         state: PropertyPurchaseState::Pending,
-                        message: "Property reserved. Blockchain settlement is not enabled on this server yet; no VGLD was debited.".to_string(),
+                        message: "Property reserved. Blockchain settlement is not enabled on this \
+                                  server yet; no VGLD was debited."
+                            .to_string(),
                     })?;
                     return Ok(());
                 }
@@ -134,25 +139,33 @@ impl Sys {
                         PropertyPurchaseState::Failed,
                         "That property is currently at capacity.".to_string(),
                     ),
-                    Some(parcel) if std::env::var("VELOREN_PROPERTY_SANDBOX_PURCHASE")
-                        .ok()
-                        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")) =>
+                    Some(parcel)
+                        if std::env::var("VELOREN_PROPERTY_SANDBOX_PURCHASE")
+                            .ok()
+                            .is_some_and(|value| {
+                                value == "1" || value.eq_ignore_ascii_case("true")
+                            }) =>
                     {
                         if property_runtime.sandbox_assign_land(&player_id, &parcel.id) {
                             (
                                 PropertyPurchaseState::Owned,
-                                "Sandbox purchase complete. This development-only ownership is not a blockchain transaction.".to_string(),
+                                "Sandbox purchase complete. This development-only ownership is \
+                                 not a blockchain transaction."
+                                    .to_string(),
                             )
                         } else {
                             (
                                 PropertyPurchaseState::Failed,
-                                "Sandbox purchase is unavailable for this property or wallet.".to_string(),
+                                "Sandbox purchase is unavailable for this property or wallet."
+                                    .to_string(),
                             )
                         }
                     },
                     Some(_) => (
                         PropertyPurchaseState::Unavailable,
-                        "Property purchases are not configured on this server yet. No wallet transaction was created.".to_string(),
+                        "Property purchases are not configured on this server yet. No wallet \
+                         transaction was created."
+                            .to_string(),
                     ),
                 };
                 client.send(ServerGeneral::PropertyPurchaseResult {

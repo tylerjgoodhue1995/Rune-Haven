@@ -1115,12 +1115,12 @@ impl WorldSim {
             // arranged along one horizontal line.
             let continents = [
                 // A tall, slightly tilted western continent.
-                (0.09, 0.25, 0.11, 0.32, -0.28, 0.0, 0.0),
+                (0.20, 0.25, 0.15, 0.32, -0.28, 0.0, 0.0),
                 // A broad, lower central continent, kept well away from the
                 // western and eastern shorelines.
-                (0.50, 0.73, 0.17, 0.18, 0.20, 1.7, 2.4),
+                (0.50, 0.72, 0.18, 0.19, 0.20, 1.7, 2.4),
                 // A tall, offset eastern continent with a stronger tilt.
-                (0.91, 0.24, 0.11, 0.31, 0.58, 3.9, 4.6),
+                (0.80, 0.25, 0.15, 0.31, 0.58, 3.9, 4.6),
             ];
 
             let mut continentalness = 0.0f64;
@@ -1144,14 +1144,12 @@ impl WorldSim {
                 // coastlines irregular instead of perfect ellipses. Each
                 // continent samples a different offset so the silhouettes
                 // do not repeat.
-                let coast_noise = gen_ctx.small_nz.get([
-                    nx * 4.2 + noise_x,
-                    ny * 4.2 + noise_y,
-                ]);
-                let detail_noise = gen_ctx.small_nz.get([
-                    nx * 9.0 + noise_x * 0.7,
-                    ny * 9.0 + noise_y * 0.7,
-                ]);
+                let coast_noise = gen_ctx
+                    .small_nz
+                    .get([nx * 4.2 + noise_x, ny * 4.2 + noise_y]);
+                let detail_noise = gen_ctx
+                    .small_nz
+                    .get([nx * 9.0 + noise_x * 0.7, ny * 9.0 + noise_y * 0.7]);
 
                 shape += coast_noise * 0.18 + detail_noise * 0.06;
 
@@ -1160,13 +1158,41 @@ impl WorldSim {
                 continentalness = continentalness.max(shape);
             }
 
+            // Smaller geological formations enrich the ocean without joining
+            // the major landmasses. They intentionally use different scales,
+            // rotations, and noise offsets so they do not read as repeated
+            // circles.
+            let islands = [
+                (0.20, 0.78, 0.025, 0.045, 0.4, 0.3, 2.1),
+                (0.34, 0.30, 0.040, 0.022, -0.7, 1.1, 4.4),
+                (0.42, 0.84, 0.018, 0.032, 1.2, 2.0, 0.8),
+                (0.57, 0.47, 0.030, 0.016, 0.2, 3.3, 1.7),
+                (0.69, 0.84, 0.022, 0.040, -0.3, 4.6, 3.2),
+                (0.76, 0.38, 0.045, 0.020, 0.9, 5.2, 0.5),
+                (0.86, 0.67, 0.020, 0.028, -1.1, 6.1, 2.6),
+                (0.51, 0.08, 0.032, 0.018, 0.6, 7.0, 4.8),
+            ];
+
+            for &(cx, cy, rx, ry, angle, noise_x, noise_y) in &islands {
+                let offset_x = nx - cx;
+                let offset_y = ny - cy;
+                let cos_angle = angle.cos();
+                let sin_angle = angle.sin();
+                let rotated_x = offset_x * cos_angle + offset_y * sin_angle;
+                let rotated_y = -offset_x * sin_angle + offset_y * cos_angle;
+                let distance = (rotated_x / rx).powi(2) + (rotated_y / ry).powi(2);
+                let coast_noise = gen_ctx
+                    .small_nz
+                    .get([nx * 18.0 + noise_x, ny * 18.0 + noise_y]);
+                let island_shape =
+                    (1.0 - distance.sqrt() + coast_noise * 0.12).clamp(0.0, 1.0) * 0.78;
+                continentalness = continentalness.max(island_shape);
+            }
+
             // Keep a continuous ocean rim around the world boundary. This
             // prevents a continent from being cut off at the map edge and
             // guarantees that each shoreline has open water beyond it.
-            let edge_distance = nx
-                .min(1.0 - nx)
-                .min(ny)
-                .min(1.0 - ny);
+            let edge_distance = nx.min(1.0 - nx).min(ny).min(1.0 - ny);
             let edge_fade = (edge_distance / 0.08).clamp(0.0, 1.0);
             let edge_fade = edge_fade * edge_fade * (3.0 - 2.0 * edge_fade);
             continentalness *= edge_fade;
@@ -1209,6 +1235,13 @@ impl WorldSim {
         // ================================================================
         // END THREE-CONTINENT MACRO WORLD SHAPE
         // ================================================================
+
+        let macro_land_chunks = alt_old.iter().filter(|(_, height)| *height > 0.0).count();
+        info!(
+            macro_land_chunks,
+            total_chunks = alt_old.len(),
+            "Generated macro geography"
+        );
 
         // Calculate oceans.
         let is_ocean = get_oceans(map_size_lg, |posi: usize| alt_old[posi].1);
@@ -2722,6 +2755,29 @@ impl SimChunk {
                     .max(0.0)
                     .div(1.0 - CONFIG.tropical_temp))
             .max(0.0);
+
+        // Keep the three macro landmasses visually distinct while retaining
+        // the normal biome system and its noise-driven local variation.
+        let normalized = Vec2::new(
+            pos.x as f32 / (map_size_lg.chunks().x.saturating_sub(1) as f32).max(1.0),
+            pos.y as f32 / (map_size_lg.chunks().y.saturating_sub(1) as f32).max(1.0),
+        );
+        let continent_profiles = [
+            (Vec2::new(0.20, 0.25), 0.15, 0.32), // northern snow continent
+            (Vec2::new(0.50, 0.72), 0.55, -0.45), // warm, dry badlands
+            (Vec2::new(0.80, 0.25), 0.05, 0.12), // temperate mixed-biome continent
+        ];
+        let (profile_temp, profile_humidity) = continent_profiles
+            .iter()
+            .map(|(center, temp_bias, humidity_bias)| {
+                let distance = (normalized - *center).magnitude();
+                (distance, *temp_bias, *humidity_bias)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, temp_bias, humidity_bias)| (temp_bias, humidity_bias))
+            .unwrap_or((0.0, 0.0));
+        let temp = (temp + profile_temp).clamp(-1.0, 1.0);
+        let humidity = (humidity + profile_humidity).clamp(0.0, 1.0);
 
         let mut alt = CONFIG.sea_level.add(alt_pre);
         let basement = CONFIG.sea_level.add(basement_pre);

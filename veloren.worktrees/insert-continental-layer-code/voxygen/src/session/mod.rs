@@ -2299,7 +2299,9 @@ impl PlayState for SessionState {
                             .or_else(|_| std::env::var("VGLD_MINT_ADDRESS"));
                         let treasury = std::env::var("VELOREN_VGLD_TREASURY");
                         match (mint, treasury) {
-                            (Ok(mint), Ok(treasury)) if !mint.trim().is_empty() && !treasury.trim().is_empty() => {
+                            (Ok(mint), Ok(treasury))
+                                if !mint.trim().is_empty() && !treasury.trim().is_empty() =>
+                            {
                                 match VgldBridge::start(1_000_000_000, &mint, &treasury) {
                                     Ok(bridge) => {
                                         self.vgld_bridge = Some(bridge);
@@ -2311,7 +2313,8 @@ impl PlayState for SessionState {
                                 }
                             },
                             _ => self.hud.set_vgld_account_status(
-                                "Set VELOREN_VGLD_MINT and VELOREN_VGLD_TREASURY to enable automatic deposits."
+                                "Set VELOREN_VGLD_MINT and VELOREN_VGLD_TREASURY to enable \
+                                 automatic deposits."
                                     .to_string(),
                             ),
                         }
@@ -2324,7 +2327,8 @@ impl PlayState for SessionState {
                                 Ok(bridge) => {
                                     self.purchase_bridge = Some(bridge);
                                     self.hud.set_property_purchase_status(
-                                        "Purchase page opened. Approve the transaction in your wallet."
+                                        "Purchase page opened. Approve the transaction in your \
+                                         wallet."
                                             .to_string(),
                                     );
                                 },
