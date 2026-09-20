@@ -32,7 +32,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tracing::{error, warn};
-use world::sim::{DEFAULT_WORLD_SEED, FileOpts};
+use world::sim::FileOpts;
 
 use self::server_physics::ServerPhysicsForceList;
 
@@ -221,7 +221,7 @@ impl Default for Settings {
             ],
             auth_server_address: Some("http://localhost:19253".into()),
             query_address: Some(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 14006))),
-            world_seed: DEFAULT_WORLD_SEED,
+            world_seed: 130626853, // Fixed seed for three-continent map
             server_name: "Veloren Server".into(),
             max_players: 100,
             day_length: DAY_LENGTH_DEFAULT,
@@ -348,12 +348,8 @@ impl Settings {
                 )),
             }],
             auth_server_address: None,
-            // If loading the default map file, make sure the seed is also default.
-            world_seed: if load.map_file.is_some() {
-                load.world_seed
-            } else {
-                DEFAULT_WORLD_SEED
-            },
+            // Use fixed seed for three-continent map
+            world_seed: 130626853,
             server_name: SINGLEPLAYER_SERVER_NAME.to_owned(),
             max_players: 100,
             max_view_distance: None,

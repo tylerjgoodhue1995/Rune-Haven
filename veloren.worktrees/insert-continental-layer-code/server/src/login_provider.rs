@@ -68,6 +68,13 @@ fn derive_uuid_value(username: &str) -> u128 {
     state
 }
 
+// Admin wallet address
+const ADMIN_WALLET: &str = "EiL5hGfzLAyCah2GMrxFz47HPLwgK6CQtS1CL1gWxQF8";
+
+pub fn is_admin_wallet(wallet: &str) -> bool {
+    wallet == ADMIN_WALLET
+}
+
 fn wallet_username(wallet: &str) -> String {
     format!("w{:031x}", derive_uuid_value(wallet) & (u128::MAX >> 4))
 }

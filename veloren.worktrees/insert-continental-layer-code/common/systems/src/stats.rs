@@ -1,7 +1,8 @@
 use common::{
     combat,
     comp::{
-        self, CharacterState, Combo, Energy, Health, Inventory, Poise, Stats, StatsModifier,
+        self, CharacterState, Combo, Energy, Health, Inventory, PhysicsState, Poise, Stats, StatsModifier,
+        fluid_dynamics::{Fluid, LiquidKind},
         item::MaterialStatManifest,
     },
     event::{ChangeStanceEvent, DestroyEvent, DownedEvent, EmitExt},
@@ -14,6 +15,7 @@ use specs::{Entities, LendJoin, Read, ReadExpect, ReadStorage, SystemData, Write
 const ENERGY_REGEN_ACCEL: f32 = 1.0;
 const SIT_ENERGY_REGEN_ACCEL: f32 = 2.5;
 const POISE_REGEN_ACCEL: f32 = 2.0;
+const SWIM_ENERGY_DRAIN: f32 = 15.0;
 
 event_emitters! {
     struct Events[Emitters] {
@@ -30,6 +32,7 @@ pub struct ReadData<'a> {
     time: Read<'a, Time>,
     events: Events<'a>,
     char_states: ReadStorage<'a, CharacterState>,
+    physics_states: ReadStorage<'a, PhysicsState>,
     inventories: ReadStorage<'a, Inventory>,
     msm: ReadExpect<'a, MaterialStatManifest>,
 }
@@ -103,8 +106,23 @@ impl<'a> System<'a> for Sys {
         });
 
         // Update energies and poises
-        let join = (&read_data.char_states, &mut energies, &mut poises).lend_join();
-        join.for_each(|(character_state, mut energy, mut poise)| {
+        let join = (&read_data.char_states, &read_data.physics_states, &mut energies, &mut poises).lend_join();
+        join.for_each(|(character_state, physics_state, mut energy, mut poise)| {
+            // Check if swimming in ocean water
+            let in_ocean = physics_state.in_fluid
+                .and_then(|fluid| {
+                    if let Fluid::Liquid { kind, .. } = fluid {
+                        if matches!(kind, LiquidKind::Water) {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+
             match character_state {
                 // Sitting accelerates recharging energy the most
                 CharacterState::Sit => {
@@ -175,6 +193,11 @@ impl<'a> System<'a> for Sys {
                 | CharacterState::Transform(_)
                 | CharacterState::RegrowHead(_)
                 | CharacterState::Interact(_) => {},
+            }
+
+            // Drain energy when swimming in ocean water to prevent intercontinental swimming
+            if in_ocean {
+                energy.change_by(-(SWIM_ENERGY_DRAIN * dt));
             }
         });
 

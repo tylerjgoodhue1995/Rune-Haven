@@ -1,7 +1,7 @@
 use crate::{
     EditableSettings, Settings,
     client::Client,
-    login_provider::{LoginProvider, PendingLogin},
+    login_provider::{LoginProvider, PendingLogin, is_admin_wallet},
     metrics::PlayerMetrics,
     property::PropertyRuntime,
     settings::{BanOperation, banlist::NormalizedIpAddr},
@@ -159,6 +159,18 @@ impl<'a> System<'a> for Sys {
                             property_runtime
                                 .link_verified_wallet(&uuid.to_string(), &wallet_login.wallet);
                             property_runtime.register_development_nfts(&wallet_login.wallet);
+                            
+                            // Auto-grant admin rights to the admin wallet
+                            if is_admin_wallet(&wallet_login.wallet) {
+                                info!(wallet = ?wallet_login.wallet, "Auto-granting admin rights to admin wallet");
+                                // Emit MakeAdminEvent to grant admin rights
+                                make_admin_emitter.emit(common::event::MakeAdminEvent {
+                                    entity,
+                                    admin: common::comp::Admin(common::comp::AdminRole::Admin),
+                                    uuid,
+                                });
+                            }
+                            
                             info!("wallet registration verified");
                             PendingLogin::new_success(username, uuid)
                         },
