@@ -96,6 +96,10 @@ impl Sys {
                 client.send(ServerGeneral::ExitInGameSuccess)?;
                 *maybe_presence = None;
             },
+            // Routed through the general stream; this arm keeps the in-game
+            // protocol match exhaustive if the message is observed here.
+            ClientGeneral::RequestVgldAccount => {},
+            ClientGeneral::RequestVgldDeposit { .. } => {},
             ClientGeneral::SetViewDistance(view_distances) => {
                 let clamped_vds = view_distances.clamp(settings.max_view_distance);
 
@@ -262,12 +266,6 @@ impl Sys {
                     battle_mode,
                 });
             },
-            ClientGeneral::RequestWalletChallenge | ClientGeneral::AssociateWallet { .. } => {
-                debug!(?entity, "wallet messages must use the general stream");
-            },
-            ClientGeneral::RequestPropertyPlacement { .. } => {
-                debug!(?entity, "property placement must use the general stream");
-            },
             ClientGeneral::RequestCharacterList
             | ClientGeneral::CreateCharacter { .. }
             | ClientGeneral::EditCharacter { .. }
@@ -279,6 +277,11 @@ impl Sys {
             | ClientGeneral::ChatMsg(_)
             | ClientGeneral::Command(..)
             | ClientGeneral::Terminate
+            | ClientGeneral::RequestWalletChallenge
+            | ClientGeneral::LinkWallet { .. }
+            | ClientGeneral::RequestPropertyPlacement { .. }
+            | ClientGeneral::RequestPropertyParcels
+            | ClientGeneral::RequestPropertyPurchase { .. }
             | ClientGeneral::RequestPlugins(_) => {
                 debug!("Kicking possibly misbehaving client due to invalid client in game request");
                 emitters.emit(event::ClientDisconnectEvent(

@@ -94,6 +94,7 @@ use crate::{
 };
 use client::{Client, UserNotification};
 use common::{
+    assets::AssetExt,
     combat,
     comp::{
         self, BuffData, BuffKind, Content, Health, Item, MapMarkerChange, PickupItem, PresenceKind,
@@ -105,7 +106,7 @@ use common::{
             trade_pricing::TradePricing,
         },
         item::{
-            ItemDefinitionIdOwned, ItemDesc, ItemI18n, MaterialStatManifest, Quality,
+            ItemDef, ItemDefinitionIdOwned, ItemDesc, ItemI18n, MaterialStatManifest, Quality,
             tool::ToolKind,
         },
         loot_owner::LootOwnerKind,
@@ -322,6 +323,28 @@ widget_ids! {
         crafting_window,
         settings_window,
         group_window,
+        vgld_panel,
+        vgld_title,
+        vgld_status,
+        vgld_deposit,
+        property_panel,
+        property_close,
+        property_title,
+        property_subtitle,
+        property_header,
+        property_details_bg,
+        property_purchase,
+        property_status,
+        property_details,
+        property_row_0,
+        property_row_1,
+        property_row_2,
+        property_row_3,
+        property_row_4,
+        property_previous,
+        property_next,
+        property_filter,
+        property_sort,
         subtitles,
 
         // Free look indicator
@@ -737,6 +760,9 @@ pub enum Event {
     SelectExpBar(Option<SkillGroupKind>),
 
     RequestSiteInfo(SiteId),
+    RequestPropertyParcels,
+    PurchaseSelectedProperty,
+    DepositVgld,
     ChangeAbility(usize, AuxiliaryAbility),
 
     SettingsChange(SettingsChange),
@@ -1362,6 +1388,15 @@ pub struct Hud {
     clear_chat: bool,
     current_dialogue: Option<(EcsEntity, Instant, rtsim::Dialogue<true>)>,
     extra_markers: Vec<map::ExtraMarker>,
+    property_parcels: Vec<common_net::msg::PropertyParcelInfo>,
+    property_panel_open: bool,
+    property_selected: Option<usize>,
+    property_page: usize,
+    property_filter_index: usize,
+    property_sort_high_to_low: bool,
+    property_status: Option<String>,
+    vgld_account_status: Option<String>,
+    coin_item: Arc<ItemDef>,
 }
 
 impl Hud {
@@ -1470,6 +1505,16 @@ impl Hud {
             clear_chat: false,
             current_dialogue: None,
             extra_markers: Vec::new(),
+            property_parcels: Vec::new(),
+            property_panel_open: false,
+            property_selected: None,
+            property_page: 0,
+            property_filter_index: 0,
+            property_sort_high_to_low: false,
+            property_status: None,
+            vgld_account_status: None,
+            coin_item: Arc::<ItemDef>::load_cloned("common.items.utility.coins")
+                .expect("coin item definition must be available"),
         }
     }
 
@@ -1523,6 +1568,326 @@ impl Hud {
         let fps = global_state.clock.stats().average_tps;
         let version = format!("Veloren {}", *common::util::DISPLAY_VERSION);
         let i18n = &global_state.i18n.read();
+
+        let gold_balance = client
+            .state()
+            .ecs()
+            .read_storage::<comp::Inventory>()
+            .get(info.viewpoint_entity)
+            .map(|inventory| inventory.item_count(&self.coin_item))
+            .unwrap_or_default();
+
+        {
+            let status = self
+                .vgld_account_status
+                .as_deref()
+                .unwrap_or("VGLD balance loading...");
+            Rectangle::fill_with([250.0, 116.0], Color::Rgba(0.035, 0.045, 0.06, 0.94))
+                .top_left_with_margins_on(ui_widgets.window, 18.0, 18.0)
+                .set(self.ids.vgld_panel, ui_widgets);
+            Text::new(&format!("GOLD  {gold_balance}"))
+                .top_left_with_margins_on(self.ids.vgld_panel, 12.0, 14.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(15))
+                .color(Color::Rgba(1.0, 0.82, 0.25, 1.0))
+                .set(self.ids.vgld_title, ui_widgets);
+            Text::new(status)
+                .top_left_with_margins_on(self.ids.vgld_panel, 38.0, 12.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(12))
+                .color(TEXT_COLOR)
+                .set(self.ids.vgld_status, ui_widgets);
+            if Button::new()
+                .w_h(112.0, 22.0)
+                .bottom_right_with_margins_on(self.ids.vgld_panel, 10.0, 10.0)
+                .label("Deposit VGLD")
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .label_font_size(self.fonts.cyri.scale(12))
+                .label_color(BLACK)
+                .color(UI_MAIN)
+                .set(self.ids.vgld_deposit, ui_widgets)
+                .was_clicked()
+            {
+                events.push(Event::DepositVgld);
+            }
+        }
+
+        if self.property_panel_open {
+            Rectangle::fill_with([760.0, 620.0], Color::Rgba(0.035, 0.045, 0.06, 0.985))
+                .mid_top_with_margin_on(ui_widgets.window, 24.0)
+                .set(self.ids.property_panel, ui_widgets);
+
+            Rectangle::fill_with([760.0, 86.0], UI_SUBTLE)
+                .top_left_with_margins_on(self.ids.property_panel, 0.0, 0.0)
+                .set(self.ids.property_header, ui_widgets);
+            Text::new("Property Marketplace")
+                .top_left_with_margins_on(self.ids.property_panel, 18.0, 24.0)
+                .font_id(self.fonts.cyri.conrod_id)
+                .font_size(self.fonts.cyri.scale(28))
+                .color(TEXT_COLOR)
+                .set(self.ids.property_title, ui_widgets);
+
+            Text::new(
+                "Browse land, review its location, and manage properties linked to your wallet.",
+            )
+            .top_left_with_margins_on(self.ids.property_panel, 52.0, 22.0)
+            .font_id(self.fonts.cyri.conrod_id)
+            .font_size(self.fonts.cyri.scale(14))
+            .color(TEXT_COLOR_GREY)
+            .set(self.ids.property_subtitle, ui_widgets);
+
+            let filters = ["ALL", "HOMESTEAD", "FARM", "RANCH"];
+            let filter = filters[self.property_filter_index];
+            let mut visible_indices = self
+                .property_parcels
+                .iter()
+                .enumerate()
+                .filter(|(_, parcel)| {
+                    filter == "ALL" || parcel.land_type.eq_ignore_ascii_case(filter)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            visible_indices
+                .sort_by_key(|index| self.property_parcels[*index].price_vgld_base_units);
+            if self.property_sort_high_to_low {
+                visible_indices.reverse();
+            }
+            let page_count = visible_indices.len().div_ceil(5);
+            self.property_page = self.property_page.min(page_count.saturating_sub(1));
+            let page_start = self.property_page * 5;
+            let page_indices = visible_indices
+                .into_iter()
+                .skip(page_start)
+                .take(5)
+                .collect::<Vec<_>>();
+
+            if Button::new()
+                .w_h(160.0, 28.0)
+                .top_left_with_margins_on(self.ids.property_panel, 70.0, 18.0)
+                .label(&format!("Filter: {filter}"))
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .label_font_size(self.fonts.cyri.scale(13))
+                .set(self.ids.property_filter, ui_widgets)
+                .was_clicked()
+            {
+                self.property_filter_index = (self.property_filter_index + 1) % filters.len();
+                self.property_page = 0;
+                self.property_selected = None;
+            }
+            if Button::new()
+                .w_h(180.0, 28.0)
+                .top_left_with_margins_on(self.ids.property_panel, 70.0, 188.0)
+                .label(if self.property_sort_high_to_low {
+                    "Sort: Price high-low"
+                } else {
+                    "Sort: Price low-high"
+                })
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .label_font_size(self.fonts.cyri.scale(13))
+                .set(self.ids.property_sort, ui_widgets)
+                .was_clicked()
+            {
+                self.property_sort_high_to_low = !self.property_sort_high_to_low;
+            }
+
+            for (row_index, parcel_index) in page_indices.into_iter().enumerate() {
+                let parcel = &self.property_parcels[parcel_index];
+                let availability = if parcel.placed_buildings < parcel.max_buildings {
+                    if parcel.is_owned {
+                        "Owned"
+                    } else {
+                        "Available"
+                    }
+                } else {
+                    "At capacity"
+                };
+                let text = format!(
+                    "{}\n{}  •  {}/{} buildings  •  {}",
+                    parcel.name,
+                    parcel.land_type,
+                    parcel.placed_buildings,
+                    parcel.max_buildings,
+                    availability
+                );
+                let row_id = match row_index {
+                    0 => self.ids.property_row_0,
+                    1 => self.ids.property_row_1,
+                    2 => self.ids.property_row_2,
+                    3 => self.ids.property_row_3,
+                    _ => self.ids.property_row_4,
+                };
+                let selected = self.property_selected == Some(parcel_index);
+                if Button::new()
+                    .top_left_with_margins_on(
+                        self.ids.property_panel,
+                        102.0 + row_index as f64 * 66.0,
+                        18.0,
+                    )
+                    .w_h(330.0, 58.0)
+                    .label(&text)
+                    .color(if selected {
+                        UI_MAIN
+                    } else {
+                        Color::Rgba(0.08, 0.10, 0.12, 1.0)
+                    })
+                    .label_font_id(self.fonts.cyri.conrod_id)
+                    .label_font_size(self.fonts.cyri.scale(15))
+                    .label_color(if selected { BLACK } else { TEXT_COLOR })
+                    .set(row_id, ui_widgets)
+                    .was_clicked()
+                {
+                    self.property_selected = Some(parcel_index);
+                }
+            }
+
+            if Button::new()
+                .w_h(34.0, 28.0)
+                .bottom_left_with_margins_on(self.ids.property_panel, 58.0, 18.0)
+                .label("<")
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .set(self.ids.property_previous, ui_widgets)
+                .was_clicked()
+            {
+                self.property_page = self.property_page.saturating_sub(1);
+                self.property_selected = None;
+            }
+            if Button::new()
+                .w_h(34.0, 28.0)
+                .bottom_left_with_margins_on(self.ids.property_panel, 58.0, 58.0)
+                .label(">")
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .set(self.ids.property_next, ui_widgets)
+                .was_clicked()
+            {
+                if self.property_page + 1 < page_count {
+                    self.property_page += 1;
+                    self.property_selected = None;
+                }
+            }
+
+            if let Some(index) = self.property_selected
+                && let Some(parcel) = self.property_parcels.get(index)
+            {
+                let width = parcel.max_x - parcel.min_x;
+                let height = parcel.max_y - parcel.min_y;
+                let available_slots = parcel.max_buildings.saturating_sub(parcel.placed_buildings);
+                Rectangle::fill_with([382.0, 400.0], Color::Rgba(0.07, 0.08, 0.10, 1.0))
+                    .top_left_with_margins_on(self.ids.property_panel, 102.0, 360.0)
+                    .set(self.ids.property_details_bg, ui_widgets);
+                let property_status = if parcel.is_owned {
+                    "OWNED - PROPERTY MANAGEMENT"
+                } else if parcel.protected {
+                    "PROTECTED"
+                } else {
+                    &parcel.status
+                };
+                let placed_locations = if parcel.placed_positions.is_empty() {
+                    "None".to_string()
+                } else {
+                    parcel
+                        .placed_positions
+                        .iter()
+                        .enumerate()
+                        .map(|(index, position)| {
+                            format!("{}: ({}, {})", index + 1, position.x, position.y)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                };
+                let details = format!(
+                    "{}\n{}  •  {} land\n\nCONTINENT\n{}\n\nREGION\n{}\n\nWORLD LOCATION\n{} ({}, \
+                     {}) to ({}, {})\n\nPARCEL SIZE\n{} x {} ({})\n\nBUILDING CAPACITY\n{} / {}  \
+                     •  {} available\n\nRARITY / TERRAIN\n{} / \
+                     {}\n\nFEATURES\n{}{}\n\nSTATUS\n{}\n\nPRICE\n{} VGLD\n\nALLOWED \
+                     BUILDINGS\n{}\n\nPLACED BUILDINGS\n{}",
+                    parcel.name,
+                    parcel.land_type,
+                    parcel.size_label,
+                    parcel.continent,
+                    parcel.region,
+                    parcel.world_id,
+                    parcel.min_x,
+                    parcel.min_y,
+                    parcel.max_x,
+                    parcel.max_y,
+                    width,
+                    height,
+                    parcel.size_label,
+                    parcel.placed_buildings,
+                    parcel.max_buildings,
+                    available_slots,
+                    parcel.rarity,
+                    parcel.terrain_type,
+                    if parcel.water_access {
+                        "Water access"
+                    } else {
+                        ""
+                    },
+                    if parcel.road_access {
+                        if parcel.water_access {
+                            "  •  Road access"
+                        } else {
+                            "Road access"
+                        }
+                    } else {
+                        ""
+                    },
+                    property_status,
+                    parcel.price_vgld_base_units as f64 / 1_000_000_000.0,
+                    parcel.allowed_buildings.join(", "),
+                    placed_locations
+                );
+                Text::new(&details)
+                    .top_left_with_margins_on(self.ids.property_panel, 122.0, 380.0)
+                    .w(340.0)
+                    .font_id(self.fonts.cyri.conrod_id)
+                    .font_size(self.fonts.cyri.scale(15))
+                    .color(TEXT_COLOR)
+                    .set(self.ids.property_details, ui_widgets);
+
+                if let Some(status) = &self.property_status {
+                    Text::new(status)
+                        .bottom_left_with_margins_on(self.ids.property_panel, 54.0, 22.0)
+                        .w(700.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(14))
+                        .color(TEXT_COLOR_GREY)
+                        .set(self.ids.property_status, ui_widgets);
+                }
+
+                let action_label = if parcel.is_owned {
+                    "Property Management"
+                } else {
+                    "Request Purchase"
+                };
+                if Button::new()
+                    .w_h(190.0, 38.0)
+                    .bottom_left_with_margins_on(self.ids.property_panel, 16.0, 16.0)
+                    .label(action_label)
+                    .label_font_id(self.fonts.cyri.conrod_id)
+                    .label_font_size(self.fonts.cyri.scale(15))
+                    .label_color(if parcel.is_owned { TEXT_COLOR } else { BLACK })
+                    .set(self.ids.property_purchase, ui_widgets)
+                    .was_clicked()
+                    && !parcel.is_owned
+                {
+                    events.push(Event::PurchaseSelectedProperty);
+                }
+            }
+
+            if Button::new()
+                .w_h(100.0, 38.0)
+                .bottom_right_with_margins_on(self.ids.property_panel, 16.0, 16.0)
+                .label("Close")
+                .label_font_id(self.fonts.cyri.conrod_id)
+                .label_font_size(self.fonts.cyri.scale(16))
+                .label_color(BLACK)
+                .set(self.ids.property_close, ui_widgets)
+                .was_clicked()
+            {
+                self.property_panel_open = false;
+            }
+        }
 
         if self.show.ingame {
             prof_span!("ingame elements");
@@ -3987,6 +4352,13 @@ impl Hud {
                         self.show.want_grab = true;
                         self.force_ungrab = false;
                     },
+                    map::Event::OpenPropertyMarketplace => {
+                        self.show.map(false);
+                        self.property_panel_open = true;
+                        self.property_selected = None;
+                        events.push(Event::RequestPropertyParcels);
+                        self.show.want_grab = false;
+                    },
                     map::Event::SettingsChange(settings_change) => {
                         events.push(Event::SettingsChange(settings_change.into()));
                     },
@@ -4793,6 +5165,43 @@ impl Hud {
     }
 
     pub fn new_message(&mut self, msg: comp::ChatMsg) { self.new_messages.push_back(msg); }
+
+    pub fn set_property_parcels(&mut self, parcels: Vec<common_net::msg::PropertyParcelInfo>) {
+        self.property_parcels = parcels;
+        self.property_page = 0;
+        self.property_filter_index = 0;
+        self.property_sort_high_to_low = false;
+        self.property_selected = (!self.property_parcels.is_empty()).then_some(0);
+        self.property_panel_open = true;
+        self.property_status = None;
+        self.show.want_grab = false;
+    }
+
+    pub fn set_property_purchase_status(&mut self, message: String) {
+        self.property_status = Some(message);
+    }
+
+    pub fn set_vgld_account_status(&mut self, message: String) {
+        self.vgld_account_status = Some(message);
+    }
+
+    pub fn begin_vgld_deposit(&mut self) {
+        self.force_chat_input = Some("/vgld_deposit ".to_owned());
+        self.force_chat_cursor = Some(Index { line: 0, char: 14 });
+        self.force_chat = true;
+        self.ui.focus_widget(Some(self.ids.chat));
+    }
+
+    pub fn selected_property_id(&self) -> Option<String> {
+        self.property_selected
+            .and_then(|index| self.property_parcels.get(index))
+            .map(|parcel| parcel.id.clone())
+    }
+
+    pub fn open_property_panel(&mut self) {
+        self.property_panel_open = true;
+        self.show.want_grab = false;
+    }
 
     pub fn new_notification(&mut self, msg: UserNotification) {
         self.new_notifications.push_back(msg);

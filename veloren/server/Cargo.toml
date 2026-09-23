@@ -44,14 +44,10 @@ specs = { workspace = true, features = ["shred-derive"] }
 
 strum = { workspace = true }
 bincode = { workspace = true }
-async-trait = { workspace = true }
-bs58 = "0.5"
-ed25519-dalek = "2"
 num_cpus = "1.0"
 tracing = { workspace = true }
 vek = { workspace = true }
 futures-util = { workspace = true }
-futures = "0.3"
 tokio = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
@@ -66,11 +62,11 @@ lazy_static = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 rand = { workspace = true }
 hashbrown = { workspace = true }
 parking_lot = { version = "0.12" }
 rayon = { workspace = true }
-reqwest = { workspace = true }
 crossbeam-channel = { workspace = true }
 prometheus = { workspace = true }
 portpicker = { git = "https://github.com/xMAC94x/portpicker-rs", rev = "e04e3a61d6c1645c865b36c57877f1f8e48e0cb7" }
@@ -84,3 +80,5 @@ rusqlite = { workspace = true }
 refinery = { version = "0.9", features = ["rusqlite"] }
 
 schnellru = "0.2.1"
+ed25519-dalek = "2"
+bs58 = "0.5"

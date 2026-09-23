@@ -9,6 +9,7 @@ use crate::{
     render::{Drawer, GlobalsBindGroup},
     session::SessionState,
     settings::Settings,
+    wallet_bridge::WalletBridge,
     window::Event,
 };
 use chrono::{DateTime, Local, Utc};
@@ -20,7 +21,7 @@ use client::{
 use client_init::{ClientInit, Error as InitError, Msg as InitMsg};
 use common::{comp, event::UpdateCharacterMetadata};
 use common_base::span;
-use common_net::msg::ClientType;
+use common_net::msg::{ClientType, WalletLogin};
 #[cfg(feature = "plugins")]
 use common_state::plugin::PluginMgr;
 use i18n::{LocalizationGuard, LocalizationHandle, fluent_args};
@@ -28,9 +29,15 @@ use i18n::{LocalizationGuard, LocalizationHandle, fluent_args};
 use server::ServerInitStage;
 #[cfg(any(feature = "singleplayer", feature = "plugins"))]
 use specs::WorldExt;
-use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    path::Path,
+    rc::Rc,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::runtime;
-use tracing::error;
+use tracing::{error, info};
 use ui::{Event as MainMenuEvent, MainMenuUi};
 
 pub use ui::rand_bg_image_spec;
@@ -68,6 +75,7 @@ pub struct MainMenuState {
     main_menu_ui: MainMenuUi,
     init: InitState,
     scene: Scene,
+    wallet_bridge: Option<WalletBridge>,
 }
 
 impl MainMenuState {
@@ -77,6 +85,7 @@ impl MainMenuState {
             main_menu_ui: MainMenuUi::new(global_state),
             init: InitState::None,
             scene: Scene::new(global_state.window.renderer_mut()),
+            wallet_bridge: None,
         }
     }
 }
@@ -128,6 +137,7 @@ impl PlayState for MainMenuState {
                             &mut global_state.info_message,
                             "singleplayer".to_owned(),
                             "".to_owned(),
+                            None,
                             ConnectionArgs::Mpsc(14004),
                             &mut self.init,
                             &global_state.tokio_runtime,
@@ -400,6 +410,44 @@ impl PlayState for MainMenuState {
         }
 
         // Maintain the UI.
+        if let Some(link) = self
+            .wallet_bridge
+            .as_ref()
+            .and_then(WalletBridge::try_receive)
+        {
+            self.wallet_bridge = None;
+            info!("received wallet login data from browser bridge");
+            // A previous registration attempt can remain pending if the server
+            // closed the handshake without returning a client error. Replace it
+            // so a new wallet signature can always start a fresh login.
+            self.init = InitState::None;
+            let net_settings = &global_state.settings.networking;
+            let connection_args = ConnectionArgs::Tcp {
+                hostname: net_settings.default_server.clone(),
+                prefer_ipv6: false,
+            };
+            attempt_login(
+                &mut global_state.info_message,
+                "wallet".to_string(),
+                String::new(),
+                Some(WalletLogin {
+                    wallet: link.wallet,
+                    challenge: link.challenge,
+                    signature: link.signature,
+                }),
+                connection_args,
+                &mut self.init,
+                &global_state.tokio_runtime,
+                global_state
+                    .settings
+                    .language
+                    .send_to_server
+                    .then_some(global_state.settings.language.selected_language.clone()),
+                &global_state.i18n,
+                &global_state.config_dir,
+                global_state.args.client_type.0,
+            );
+        }
         for event in self
             .main_menu_ui
             .maintain(global_state, global_state.clock.real_dt())
@@ -447,6 +495,7 @@ impl PlayState for MainMenuState {
                         &mut global_state.info_message,
                         username,
                         password,
+                        None,
                         connection_args,
                         &mut self.init,
                         &global_state.tokio_runtime,
@@ -459,6 +508,20 @@ impl PlayState for MainMenuState {
                         &global_state.config_dir,
                         global_state.args.client_type.0,
                     );
+                },
+                MainMenuEvent::Web3Login => {
+                    let challenge = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock is before Unix epoch")
+                        .as_nanos()
+                        .to_string();
+                    match WalletBridge::start(&challenge) {
+                        Ok(bridge) => self.wallet_bridge = Some(bridge),
+                        Err(error) => {
+                            error!(?error, "Could not start wallet login bridge");
+                            global_state.info_message = Some(error);
+                        },
+                    }
                 },
                 MainMenuEvent::CancelLoginAttempt => {
                     // init contains InitState::Client(ClientInit), which spawns a thread which
@@ -720,6 +783,7 @@ fn attempt_login(
     info_message: &mut Option<String>,
     username: String,
     password: String,
+    wallet_login: Option<WalletLogin>,
     connection_args: ConnectionArgs,
     init: &mut InitState,
     runtime: &Arc<runtime::Runtime>,
@@ -761,6 +825,7 @@ fn attempt_login(
             locale,
             config_dir,
             client_type,
+            wallet_login,
         ));
     }
 }

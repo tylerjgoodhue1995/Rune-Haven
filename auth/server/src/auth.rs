@@ -38,7 +38,12 @@ pub(super) fn db() -> Result<Connection, AuthError> {
     if cfg!(test) {
         Ok(Connection::open_in_memory()?)
     } else {
-        let db_dir = &apply_db_dir_override("/opt/veloren-auth/data/auth.db");
+        let default_path = if cfg!(windows) {
+            "./data/auth.db"
+        } else {
+            "/opt/veloren-auth/data/auth.db"
+        };
+        let db_dir = &apply_db_dir_override(default_path);
         Ok(Connection::open(db_dir)?)
     }
 }

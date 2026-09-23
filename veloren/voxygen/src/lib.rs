@@ -32,6 +32,7 @@ pub mod session;
 pub mod settings;
 #[cfg(feature = "singleplayer")]
 pub mod singleplayer;
+pub mod wallet_bridge;
 pub mod window;
 
 #[cfg(feature = "singleplayer")]

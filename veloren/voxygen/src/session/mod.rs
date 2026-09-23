@@ -52,6 +52,7 @@ use crate::{
     scene::{CameraMode, DebugShapeId, Scene, SceneData, camera},
     session::target::ray_entities,
     settings::Settings,
+    wallet_bridge::{PurchaseBridge, VgldBridge, WalletBridge},
     window::{AnalogGameInput, Event},
 };
 use hashbrown::HashMap;
@@ -124,6 +125,12 @@ pub struct SessionState {
     lines: PlayerDebugLines,
     tracks: HashMap<Vec2<i32>, Vec<DebugShapeId>>,
     gizmos: Vec<(DebugShapeId, common::resources::Time, bool)>,
+    property_markers: HashSet<(String, i32, i32)>,
+    property_parcel_outlines: HashSet<String>,
+    pending_property_parcels: Vec<common_net::msg::PropertyParcelInfo>,
+    wallet_bridge: Option<WalletBridge>,
+    vgld_bridge: Option<VgldBridge>,
+    purchase_bridge: Option<PurchaseBridge>,
 }
 
 /// Represents an active game session (i.e., the one being played).
@@ -169,6 +176,7 @@ impl SessionState {
             }
         }
         let hud = Hud::new(global_state, persisted_state, &client.borrow());
+        client.borrow_mut().request_vgld_account();
         let walk_forward_dir = scene.camera().forward_xy();
         let walk_right_dir = scene.camera().right_xy();
 
@@ -200,7 +208,65 @@ impl SessionState {
             tracks: HashMap::new(),
             lines: Default::default(),
             gizmos: Vec::new(),
+            property_markers: HashSet::new(),
+            property_parcel_outlines: HashSet::new(),
+            pending_property_parcels: Vec::new(),
+            wallet_bridge: None,
+            vgld_bridge: None,
+            purchase_bridge: None,
         }
+    }
+
+    fn draw_property_parcel_outline(&mut self, parcel: &common_net::msg::PropertyParcelInfo) {
+        if !self.property_parcel_outlines.insert(parcel.id.clone()) {
+            return;
+        }
+
+        let min = Vec3::new(parcel.min_x as f32, 0.1, parcel.min_y as f32);
+        let max = Vec3::new(parcel.max_x as f32, 0.1, parcel.max_y as f32);
+        let corners = [
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(max.x, min.y, max.z),
+            Vec3::new(min.x, min.y, max.z),
+        ];
+        let edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
+        for (a, b) in edges {
+            let id = self.scene.debug.add_shape(crate::scene::DebugShape::Line(
+                [corners[a], corners[b]],
+                0.18,
+            ));
+            self.scene
+                .debug
+                .set_context(id, [0.0, 0.0, 0.0, 0.0], [0.26, 0.93, 0.8, 1.0], [
+                    0.0, 0.0, 0.0, 1.0,
+                ]);
+            self.gizmos
+                .push((id, common::resources::Time(f64::MAX), true));
+        }
+    }
+
+    pub(crate) fn current_terrain_target(&self, client: &Client) -> Option<Vec2<i32>> {
+        let camera = self.scene.camera();
+        let camera::Dependents {
+            cam_pos, cam_dir, ..
+        } = camera.dependents();
+        let focus_pos = camera.get_focus_pos();
+        let cam_pos = cam_pos + focus_pos.map(|p| p.trunc());
+        let (_, _, _, _, terrain_target) = crate::session::target::targets_under_cursor(
+            client,
+            cam_pos,
+            cam_dir,
+            false,
+            None,
+            self.viewpoint_entity().0,
+        );
+
+        terrain_target.map(|target| {
+            let pos = target.position_int();
+            Vec2::new(pos.x, pos.y)
+        })
     }
 
     fn stop_auto_walk(&mut self) {
@@ -263,6 +329,39 @@ impl SessionState {
         );
         self.scene.maintain_debug_vectors(&client, &mut self.lines);
         let pos = client.position().unwrap_or_default();
+
+        if let Some(link) = self
+            .wallet_bridge
+            .as_ref()
+            .and_then(WalletBridge::try_receive)
+        {
+            info!("received wallet link data from browser bridge");
+            client.link_wallet(link.wallet, link.challenge, link.signature);
+        }
+
+        if let Some(deposit) = self.vgld_bridge.as_ref().and_then(VgldBridge::try_receive) {
+            self.vgld_bridge = None;
+            client.request_vgld_deposit(deposit.signature);
+            self.hud.set_vgld_account_status(
+                "Deposit submitted. Waiting for server verification...".to_string(),
+            );
+        }
+
+        if let Some(purchase) = self
+            .purchase_bridge
+            .as_ref()
+            .and_then(PurchaseBridge::try_receive)
+        {
+            self.purchase_bridge = None;
+            self.hud.set_property_purchase_status(
+                "Wallet transaction confirmed. Refreshing property ownership...".to_string(),
+            );
+            client.request_property_parcels();
+            self.hud.set_property_purchase_status(format!(
+                "{}: purchase verified for wallet {}",
+                purchase.parcel_id, purchase.wallet
+            ));
+        }
 
         #[cfg(not(target_os = "macos"))]
         {
@@ -448,6 +547,119 @@ impl SessionState {
                 client::Event::PluginDataReceived(data) => {
                     tracing::warn!("Received plugin data at wrong time {}", data.len());
                 },
+                client::Event::WalletChallenge(challenge) => {
+                    match WalletBridge::start(&challenge) {
+                        Ok(bridge) => self.wallet_bridge = Some(bridge),
+                        Err(error) => self.hud.new_message(
+                            ChatType::CommandError
+                                .into_plain_msg(format!("Could not open wallet bridge: {error}")),
+                        ),
+                    }
+                },
+                client::Event::WalletLinkResult { success, message } => {
+                    self.hud.new_message(if success {
+                        ChatType::Meta.into_plain_msg(message)
+                    } else {
+                        ChatType::CommandError.into_plain_msg(message)
+                    });
+                },
+                client::Event::VgldAccount {
+                    wallet,
+                    balance_base_units,
+                    decimals,
+                    status,
+                } => {
+                    let wallet = wallet.unwrap_or_else(|| "Wallet not linked".to_string());
+                    let divisor = 10u64.saturating_pow(decimals as u32).max(1);
+                    let whole = balance_base_units / divisor;
+                    let fraction = balance_base_units % divisor;
+                    self.hud.set_vgld_account_status(format!(
+                        "{whole}.{fraction:0width$} VGLD\n{status}\n{wallet}",
+                        width = decimals as usize,
+                    ));
+                },
+                client::Event::PropertyPurchaseResult {
+                    parcel_id,
+                    state: _,
+                    message,
+                } => {
+                    self.hud
+                        .set_property_purchase_status(format!("{parcel_id}: {message}"));
+                },
+                client::Event::PropertyPlacementResult {
+                    success,
+                    parcel_id,
+                    x,
+                    y,
+                    building_type,
+                    message,
+                } => {
+                    let message = format!("{parcel_id}: {message}");
+                    if success {
+                        let key = (parcel_id.clone(), x, y);
+                        if self.property_markers.insert(key) {
+                            let (size, color) = match building_type.as_deref().unwrap_or("shop") {
+                                "house" => (Vec3::new(3.2, 3.2, 2.6), [0.54, 0.44, 0.32, 1.0]),
+                                "inn" => (Vec3::new(4.0, 4.2, 3.8), [0.84, 0.62, 0.3, 1.0]),
+                                "blacksmith" => (Vec3::new(4.5, 3.6, 3.2), [0.72, 0.5, 0.25, 1.0]),
+                                "guild_hall" => (Vec3::new(5.5, 5.5, 4.4), [0.33, 0.29, 0.66, 1.0]),
+                                "farmhouse" => (Vec3::new(4.0, 4.0, 2.8), [0.53, 0.36, 0.15, 1.0]),
+                                "barn" => (Vec3::new(5.0, 3.4, 3.0), [0.55, 0.40, 0.20, 1.0]),
+                                "stable" => (Vec3::new(3.6, 4.2, 3.0), [0.61, 0.47, 0.30, 1.0]),
+                                "castle" => (Vec3::new(6.0, 6.0, 5.0), [0.8, 0.75, 0.72, 1.0]),
+                                "fortress" => (Vec3::new(6.4, 6.0, 5.5), [0.68, 0.7, 0.78, 1.0]),
+                                "town_hall" => (Vec3::new(5.8, 5.8, 5.2), [0.82, 0.71, 0.39, 1.0]),
+                                _ => (Vec3::new(4.0, 4.0, 3.0), [0.73, 0.44, 0.18, 1.0]),
+                            };
+                            let marker_pos = Vec3::new(x as f32, 1.0, y as f32);
+                            let marker_id = self
+                                .scene
+                                .debug
+                                .add_shape(crate::scene::DebugShape::Box { size });
+                            self.scene.debug.set_context(
+                                marker_id,
+                                marker_pos.with_w(0.0).into_array(),
+                                color,
+                                [0.0, 0.0, 0.0, 1.0],
+                            );
+                            self.gizmos
+                                .push((marker_id, common::resources::Time(f64::MAX), true));
+                        }
+                    }
+                    self.hud.new_message(if success {
+                        ChatType::Meta.into_plain_msg(message)
+                    } else {
+                        ChatType::CommandError.into_plain_msg(message)
+                    });
+                },
+                client::Event::PropertyParcels(parcels) => {
+                    self.pending_property_parcels = parcels.clone();
+                    for parcel in &parcels {
+                        for placement in &parcel.placed_positions {
+                            let key = (parcel.id.clone(), placement.x, placement.y);
+                            if self.property_markers.insert(key) {
+                                let marker_pos =
+                                    Vec3::new(placement.x as f32, 1.0, placement.y as f32);
+                                let marker_id =
+                                    self.scene.debug.add_shape(crate::scene::DebugShape::Box {
+                                        size: Vec3::new(4.0, 4.0, 3.0),
+                                    });
+                                self.scene.debug.set_context(
+                                    marker_id,
+                                    marker_pos.with_w(0.0).into_array(),
+                                    [0.73, 0.44, 0.18, 1.0],
+                                    [0.0, 0.0, 0.0, 1.0],
+                                );
+                                self.gizmos.push((
+                                    marker_id,
+                                    common::resources::Time(f64::MAX),
+                                    true,
+                                ));
+                            }
+                        }
+                    }
+                    self.hud.set_property_parcels(parcels);
+                },
                 client::Event::Gizmos(gizmos) => {
                     self.gizmos.retain(|gizmos| {
                         let keep = gizmos.2;
@@ -500,6 +712,13 @@ impl SessionState {
                     }
                 },
             }
+        }
+
+        drop(client);
+        let pending = self.pending_property_parcels.clone();
+        self.pending_property_parcels.clear();
+        for parcel in &pending {
+            self.draw_property_parcel_outline(parcel);
         }
 
         Ok(TickAction::Continue)
@@ -1775,8 +1994,20 @@ impl PlayState for SessionState {
             for event in hud_events {
                 match event {
                     HudEvent::SendMessage(msg) => {
-                        // TODO: Handle result
-                        self.client.borrow_mut().send_chat(msg);
+                        if let Some(transaction_id) = msg.strip_prefix("/vgld_deposit ") {
+                            let transaction_id = transaction_id.trim();
+                            if transaction_id.is_empty() {
+                                self.hud.set_vgld_account_status(
+                                    "Paste a Solana transaction signature.".to_string(),
+                                );
+                            } else {
+                                self.client
+                                    .borrow_mut()
+                                    .request_vgld_deposit(transaction_id.to_string());
+                            }
+                        } else {
+                            self.client.borrow_mut().send_chat(msg);
+                        }
                     },
                     HudEvent::SendCommand(name, args) => {
                         match run_command(self, global_state, &name, args) {
@@ -2059,6 +2290,53 @@ impl PlayState for SessionState {
 
                     HudEvent::RequestSiteInfo(id) => {
                         self.client.borrow_mut().request_site_economy(id);
+                    },
+                    HudEvent::RequestPropertyParcels => {
+                        self.client.borrow_mut().request_property_parcels();
+                    },
+                    HudEvent::DepositVgld => {
+                        let mint = std::env::var("VELOREN_VGLD_MINT")
+                            .or_else(|_| std::env::var("VGLD_MINT_ADDRESS"));
+                        let treasury = std::env::var("VELOREN_VGLD_TREASURY");
+                        match (mint, treasury) {
+                            (Ok(mint), Ok(treasury))
+                                if !mint.trim().is_empty() && !treasury.trim().is_empty() =>
+                            {
+                                match VgldBridge::start(1_000_000_000, &mint, &treasury) {
+                                    Ok(bridge) => {
+                                        self.vgld_bridge = Some(bridge);
+                                        self.hud.set_vgld_account_status(
+                                            "Approve the 1 VGLD transfer in Phantom...".to_string(),
+                                        );
+                                    },
+                                    Err(error) => self.hud.set_vgld_account_status(error),
+                                }
+                            },
+                            _ => self.hud.set_vgld_account_status(
+                                "Set VELOREN_VGLD_MINT and VELOREN_VGLD_TREASURY to enable \
+                                 automatic deposits."
+                                    .to_string(),
+                            ),
+                        }
+                    },
+                    HudEvent::PurchaseSelectedProperty => {
+                        if let Some(parcel_id) = self.hud.selected_property_id() {
+                            let api_url = std::env::var("VELOREN_MARKETPLACE_API_URL")
+                                .unwrap_or_else(|_| "http://127.0.0.1:19254".to_string());
+                            match PurchaseBridge::start(&parcel_id, &api_url) {
+                                Ok(bridge) => {
+                                    self.purchase_bridge = Some(bridge);
+                                    self.hud.set_property_purchase_status(
+                                        "Purchase page opened. Approve the transaction in your \
+                                         wallet."
+                                            .to_string(),
+                                    );
+                                },
+                                Err(error) => self.hud.set_property_purchase_status(format!(
+                                    "Could not open purchase page: {error}"
+                                )),
+                            }
+                        }
                     },
 
                     HudEvent::CraftRecipe {

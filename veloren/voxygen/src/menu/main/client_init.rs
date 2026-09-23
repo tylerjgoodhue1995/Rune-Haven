@@ -3,7 +3,7 @@ use client::{
     addr::ConnectionArgs,
     error::{Error as ClientError, NetworkConnectError, NetworkError},
 };
-use common_net::msg::ClientType;
+use common_net::msg::{ClientType, WalletLogin};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use std::{
     path::Path,
@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::runtime;
-use tracing::{trace, warn};
+use tracing::warn;
 
 #[derive(Debug)]
 #[expect(clippy::enum_variant_names)] //TODO: evaluate ClientError ends with Enum name
@@ -53,6 +53,7 @@ impl ClientInit {
         locale: Option<String>,
         config_dir: &Path,
         client_type: ClientType,
+        wallet_login: Option<WalletLogin>,
     ) -> Self {
         let (tx, rx) = unbounded();
         let (trust_tx, trust_rx) = unbounded();
@@ -80,12 +81,13 @@ impl ClientInit {
                     break;
                 }
                 let mut mismatched_server_info = None;
-                match Client::new(
+                match Client::new_with_wallet(
                     connection_args.clone(),
                     Arc::clone(&runtime2),
                     &mut mismatched_server_info,
                     &username,
                     &password,
+                    wallet_login.clone(),
                     locale.clone(),
                     trust_fn,
                     &|stage| {
@@ -108,7 +110,7 @@ impl ClientInit {
                         warn!(?e, "Failed to connect to the server. Retrying...");
                     },
                     Err(e) => {
-                        trace!(?e, "Aborting server connection attempt");
+                        tracing::error!(?e, "Aborting server connection attempt");
                         last_err = Some(Error::ClientError {
                             error: e,
                             mismatched_server_info,

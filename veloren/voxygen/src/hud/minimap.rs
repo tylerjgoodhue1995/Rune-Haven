@@ -779,7 +779,6 @@ impl Widget for MiniMap<'_> {
                 Image::new(match &marker.kind {
                     MarkerKind::Unknown => self.imgs.mmap_unknown_bg,
                     MarkerKind::Town => self.imgs.mmap_site_town_bg,
-                    MarkerKind::City => self.imgs.mmap_site_castle_bg,
                     MarkerKind::ChapelSite => self.imgs.mmap_site_sea_chapel_bg,
                     MarkerKind::Terracotta => self.imgs.mmap_site_terracotta_bg,
                     MarkerKind::Castle => self.imgs.mmap_site_castle_bg,
@@ -816,7 +815,6 @@ impl Widget for MiniMap<'_> {
                 Image::new(match &marker.kind {
                     MarkerKind::Unknown => self.imgs.mmap_unknown,
                     MarkerKind::Town => self.imgs.mmap_site_town,
-                    MarkerKind::City => self.imgs.mmap_site_castle,
                     MarkerKind::ChapelSite => self.imgs.mmap_site_sea_chapel,
                     MarkerKind::Terracotta => self.imgs.mmap_site_terracotta,
                     MarkerKind::Castle => self.imgs.mmap_site_castle,

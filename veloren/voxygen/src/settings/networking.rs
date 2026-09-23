@@ -23,7 +23,7 @@ impl Default for NetworkingSettings {
             username: "".to_string(),
             servers: vec!["server.veloren.net".to_string()],
             default_server: "server.veloren.net".to_string(),
-            trusted_auth_servers: ["https://auth.veloren.net", "http://localhost:19253"]
+            trusted_auth_servers: ["https://auth.veloren.net", "http://127.0.0.1:19253"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),

@@ -54,6 +54,12 @@ pub enum ClientChatCommand {
     Mute,
     /// Toggles use of naga for shader processing (change not persisted).
     Naga,
+    /// Requests server authorization to place an owned building on a parcel.
+    PropertyPlace,
+    /// Requests the current parcel registry from the server.
+    PropertyList,
+    /// Starts a fresh wallet-link challenge in the browser.
+    WalletLink,
     /// Resets the state of the tutorial
     ResetTutorial,
     /// Unmutes a previously muted player
@@ -96,6 +102,31 @@ impl ClientChatCommand {
                 None,
             ),
             ClientChatCommand::Naga => cmd(vec![], Content::localized("command-naga-desc"), None),
+            ClientChatCommand::PropertyPlace => cmd(
+                vec![
+                    Any("parcel-id", Required),
+                    Any("land-nft-id", Required),
+                    Any("building-nft-id", Required),
+                    Any("x", Optional),
+                    Any("y", Optional),
+                ],
+                Content::Plain(
+                    "Request building placement authorization at a given position or the current \
+                     cursor target."
+                        .into(),
+                ),
+                None,
+            ),
+            ClientChatCommand::PropertyList => cmd(
+                vec![],
+                Content::Plain("List server land parcels".into()),
+                None,
+            ),
+            ClientChatCommand::WalletLink => cmd(
+                vec![],
+                Content::Plain("Open a fresh wallet-link challenge in the browser".into()),
+                None,
+            ),
             ClientChatCommand::Mute => cmd(
                 vec![PlayerName(Required)],
                 Content::localized("command-mute-desc"),
@@ -131,6 +162,9 @@ impl ClientChatCommand {
             ClientChatCommand::ExperimentalShader => "experimental_shader",
             ClientChatCommand::Help => "help",
             ClientChatCommand::Naga => "naga",
+            ClientChatCommand::PropertyPlace => "property_place",
+            ClientChatCommand::PropertyList => "property_list",
+            ClientChatCommand::WalletLink => "wallet_link",
             ClientChatCommand::Mute => "mute",
             ClientChatCommand::Unmute => "unmute",
             ClientChatCommand::Waypoint => "waypoint",
@@ -468,6 +502,9 @@ fn run_client_command(
         ClientChatCommand::ExperimentalShader => handle_experimental_shader,
         ClientChatCommand::Help => handle_help,
         ClientChatCommand::Naga => handle_naga,
+        ClientChatCommand::PropertyPlace => handle_property_place,
+        ClientChatCommand::PropertyList => handle_property_list,
+        ClientChatCommand::WalletLink => handle_wallet_link,
         ClientChatCommand::Mute => handle_mute,
         ClientChatCommand::Unmute => handle_unmute,
         ClientChatCommand::Waypoint => handle_waypoint,
@@ -476,6 +513,78 @@ fn run_client_command(
     };
 
     command(session_state, global_state, args)
+}
+
+fn handle_property_place(
+    session_state: &mut SessionState,
+    _global_state: &mut GlobalState,
+    args: Vec<String>,
+) -> CommandResult {
+    let (parcel_id, land_nft_id, building_nft_id, x, y) = match args.as_slice() {
+        [parcel_id, land_nft_id, building_nft_id, x, y] => (
+            parcel_id.clone(),
+            land_nft_id.clone(),
+            building_nft_id.clone(),
+            x.parse::<i32>()
+                .map_err(|_| Content::Plain("property_place: x must be an integer".into()))?,
+            y.parse::<i32>()
+                .map_err(|_| Content::Plain("property_place: y must be an integer".into()))?,
+        ),
+        [parcel_id, land_nft_id, building_nft_id] => {
+            let pos = {
+                let client = session_state.client.borrow();
+                session_state
+                    .current_terrain_target(&client)
+                    .ok_or_else(|| {
+                        Content::Plain(
+                            "property_place: no terrain target in view; aim at a block first"
+                                .into(),
+                        )
+                    })?
+            };
+
+            (
+                parcel_id.clone(),
+                land_nft_id.clone(),
+                building_nft_id.clone(),
+                pos.x,
+                pos.y,
+            )
+        },
+        _ => {
+            return Err(Content::Plain(
+                "Usage: /property_place <parcel-id> <land-nft-id> <building-nft-id> [x] [y]\nOr \
+                 use /property_place <parcel-id> <land-nft-id> <building-nft-id> to place at the \
+                 current cursor target."
+                    .into(),
+            ));
+        },
+    };
+
+    session_state
+        .client
+        .borrow_mut()
+        .request_property_placement(parcel_id, land_nft_id, building_nft_id, vek::Vec2 { x, y });
+    Ok(None)
+}
+
+fn handle_property_list(
+    session_state: &mut SessionState,
+    _global_state: &mut GlobalState,
+    _args: Vec<String>,
+) -> CommandResult {
+    session_state.hud.open_property_panel();
+    session_state.client.borrow_mut().request_property_parcels();
+    Ok(None)
+}
+
+fn handle_wallet_link(
+    session_state: &mut SessionState,
+    _global_state: &mut GlobalState,
+    _args: Vec<String>,
+) -> CommandResult {
+    session_state.client.borrow_mut().request_wallet_challenge();
+    Ok(None)
 }
 
 /// Handles [`ClientChatCommand::Clear`]

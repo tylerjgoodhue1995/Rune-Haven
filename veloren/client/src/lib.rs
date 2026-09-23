@@ -60,7 +60,7 @@ use common_net::{
     msg::{
         ChatTypeContext, ClientGeneral, ClientMsg, ClientRegister, DisconnectReason, InviteAnswer,
         Notification, PingMsg, PlayerInfo, PlayerListUpdate, RegisterError, ServerGeneral,
-        ServerInit, ServerRegisterAnswer,
+        ServerInit, ServerRegisterAnswer, WalletLogin,
         server::ServerDescription,
         world_msg::{EconomyInfo, PoiInfo, SiteId},
     },
@@ -92,7 +92,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, trace, warn};
 use vek::*;
 
 pub const MAX_SELECTABLE_VIEW_DISTANCE: u32 = 65;
@@ -129,6 +129,31 @@ pub enum Event {
     StartSpectate(Vec3<f32>),
     SpectatePosition(Vec3<f32>),
     PluginDataReceived(Vec<u8>),
+    WalletChallenge(String),
+    WalletLinkResult {
+        success: bool,
+        message: String,
+    },
+    PropertyPlacementResult {
+        success: bool,
+        parcel_id: String,
+        x: i32,
+        y: i32,
+        building_type: Option<String>,
+        message: String,
+    },
+    PropertyParcels(Vec<common_net::msg::PropertyParcelInfo>),
+    PropertyPurchaseResult {
+        parcel_id: String,
+        state: common_net::msg::PropertyPurchaseState,
+        message: String,
+    },
+    VgldAccount {
+        wallet: Option<String>,
+        balance_base_units: u64,
+        decimals: u8,
+        status: String,
+    },
     Dialogue(Uid, rtsim::Dialogue<true>),
     Gizmos(Vec<Gizmos>),
 }
@@ -470,6 +495,37 @@ impl Client {
         #[cfg_attr(not(feature = "plugins"), expect(unused_variables))] config_dir: PathBuf,
         client_type: ClientType,
     ) -> Result<Self, Error> {
+        Self::new_with_wallet(
+            addr,
+            runtime,
+            mismatched_server_info,
+            username,
+            password,
+            None,
+            locale,
+            auth_trusted,
+            init_stage_update,
+            add_foreign_systems,
+            config_dir,
+            client_type,
+        )
+        .await
+    }
+
+    pub async fn new_with_wallet(
+        addr: ConnectionArgs,
+        runtime: Arc<Runtime>,
+        mismatched_server_info: &mut Option<ServerInfo>,
+        username: &str,
+        password: &str,
+        wallet_login: Option<WalletLogin>,
+        locale: Option<String>,
+        auth_trusted: impl FnMut(&str) -> bool,
+        init_stage_update: &(dyn Fn(ClientInitStage) + Send + Sync),
+        add_foreign_systems: impl Fn(&mut DispatcherBuilder) + Send + 'static,
+        #[cfg_attr(not(feature = "plugins"), expect(unused_variables))] config_dir: PathBuf,
+        client_type: ClientType,
+    ) -> Result<Self, Error> {
         let _ = rustls::crypto::ring::default_provider().install_default(); // needs to be initialized before usage
         // Use `usize::MAX` as the output limit: we implicitly trust servers to not send
         // us too much data (TODO: should we?)
@@ -636,8 +692,11 @@ impl Client {
         let terrain_stream = participant.opened().await?;
 
         init_stage_update(ClientInitStage::WatingForServerVersion);
+        tracing::info!("sending client type");
         register_stream.send(client_type)?;
+        tracing::info!("waiting for server info");
         let server_info: ServerInfo = register_stream.recv().await?;
+        tracing::info!("received server info");
         if server_info.git_hash != *common::util::GIT_HASH
             || server_info.git_timestamp != *common::util::GIT_TIMESTAMP
         {
@@ -653,18 +712,22 @@ impl Client {
         debug!("Auth Server: {:?}", server_info.auth_provider);
 
         ping_stream.send(PingMsg::Ping)?;
+        tracing::info!("sent initial ping");
 
         init_stage_update(ClientInitStage::Authentication);
         // Register client
+        tracing::info!("starting client registration");
         Self::register(
             username,
             password,
+            wallet_login,
             locale,
             auth_trusted,
             &server_info,
             &mut register_stream,
         )
         .await?;
+        tracing::info!("completed client registration");
 
         init_stage_update(ClientInitStage::LoadingInitData);
         // Wait for initial sync
@@ -1136,49 +1199,59 @@ impl Client {
     async fn register(
         username: &str,
         password: &str,
+        wallet_login: Option<WalletLogin>,
         locale: Option<String>,
         mut auth_trusted: impl FnMut(&str) -> bool,
         server_info: &ServerInfo,
         register_stream: &mut Stream,
     ) -> Result<(), Error> {
         // Authentication
-        let token_or_username = match &server_info.auth_provider {
-            Some(addr) => {
-                // Query whether this is a trusted auth server
-                if auth_trusted(addr) {
-                    let (scheme, authority) = match addr.split_once("://") {
-                        Some((s, a)) => (s, a),
-                        None => return Err(Error::AuthServerUrlInvalid(addr.to_string())),
-                    };
+        let token_or_username = if wallet_login.is_some() {
+            // WalletLogin contains the authentication proof; do not require a
+            // username/password token from the configured auth service first.
+            username.to_owned()
+        } else {
+            match &server_info.auth_provider {
+                Some(addr) => {
+                    // Query whether this is a trusted auth server
+                    if auth_trusted(addr) {
+                        let (scheme, authority) = match addr.split_once("://") {
+                            Some((s, a)) => (s, a),
+                            None => return Err(Error::AuthServerUrlInvalid(addr.to_string())),
+                        };
 
-                    let scheme = match scheme.parse::<authc::Scheme>() {
-                        Ok(s) => s,
-                        Err(_) => return Err(Error::AuthServerUrlInvalid(addr.to_string())),
-                    };
+                        let scheme = match scheme.parse::<authc::Scheme>() {
+                            Ok(s) => s,
+                            Err(_) => return Err(Error::AuthServerUrlInvalid(addr.to_string())),
+                        };
 
-                    let authority = match authority.parse::<authc::Authority>() {
-                        Ok(a) => a,
-                        Err(_) => return Err(Error::AuthServerUrlInvalid(addr.to_string())),
-                    };
+                        let authority = match authority.parse::<authc::Authority>() {
+                            Ok(a) => a,
+                            Err(_) => return Err(Error::AuthServerUrlInvalid(addr.to_string())),
+                        };
 
-                    Ok(authc::AuthClient::new(scheme, authority)?
-                        .sign_in(username, password)
-                        .await?
-                        .serialize())
-                } else {
-                    Err(Error::AuthServerNotTrusted)
-                }
-            },
-            None => Ok(username.to_owned()),
-        }?;
+                        Ok(authc::AuthClient::new(scheme, authority)?
+                            .sign_in(username, password)
+                            .await?
+                            .serialize())
+                    } else {
+                        Err(Error::AuthServerNotTrusted)
+                    }
+                },
+                None => Ok(username.to_owned()),
+            }?
+        };
 
         debug!("Registering client...");
 
+        tracing::info!("sending client registration");
         register_stream.send(ClientRegister {
             token_or_username,
             locale,
+            wallet_login,
         })?;
 
+        tracing::info!("waiting for server registration answer");
         match register_stream.recv::<ServerRegisterAnswer>().await? {
             Err(RegisterError::AuthError(err)) => Err(Error::AuthErr(err)),
             Err(RegisterError::InvalidCharacter) => Err(Error::InvalidCharacter),
@@ -1187,6 +1260,7 @@ impl Client {
             Err(RegisterError::Banned(info)) => Err(Error::Banned(info)),
             Err(RegisterError::TooManyPlayers) => Err(Error::TooManyPlayers),
             Ok(()) => {
+                tracing::info!("server registration succeeded");
                 debug!("Client registered successfully.");
                 Ok(())
             },
@@ -1264,10 +1338,14 @@ impl Client {
                     // Always possible
                     ClientGeneral::ChatMsg(_)
                     | ClientGeneral::Command(_, _)
-                    | ClientGeneral::RequestWalletChallenge
-                    | ClientGeneral::AssociateWallet { .. }
-                    | ClientGeneral::RequestPropertyPlacement { .. }
                     | ClientGeneral::Terminate
+                    | ClientGeneral::RequestWalletChallenge
+                    | ClientGeneral::LinkWallet { .. }
+                    | ClientGeneral::RequestPropertyPlacement { .. }
+                    | ClientGeneral::RequestPropertyParcels
+                    | ClientGeneral::RequestPropertyPurchase { .. }
+                    | ClientGeneral::RequestVgldAccount
+                    | ClientGeneral::RequestVgldDeposit { .. }
                     | ClientGeneral::RequestPlugins(_) => &mut self.general_stream,
                 };
                 #[cfg(feature = "tracy")]
@@ -1291,6 +1369,55 @@ impl Client {
         self.send_msg(ClientGeneral::RequestLossyTerrainCompression {
             lossy_terrain_compression,
         })
+    }
+
+    /// Request a server-issued challenge for linking a wallet to the active
+    /// player. The returned challenge is delivered as `Event::WalletChallenge`.
+    pub fn request_wallet_challenge(&mut self) {
+        self.send_msg(ClientGeneral::RequestWalletChallenge);
+    }
+
+    /// Submit a wallet signature for the most recently issued challenge.
+    ///
+    /// The server verifies the signature and binds the wallet to the active
+    /// player; the client never asserts ownership on its own.
+    pub fn link_wallet(&mut self, wallet: String, challenge: String, signature: String) {
+        self.send_msg(ClientGeneral::LinkWallet {
+            wallet,
+            challenge,
+            signature,
+        });
+    }
+
+    /// Ask the server to authorize placement of an owned land/building NFT.
+    pub fn request_property_placement(
+        &mut self,
+        parcel_id: String,
+        land_nft_id: String,
+        building_nft_id: String,
+        position: Vec2<i32>,
+    ) {
+        self.send_msg(ClientGeneral::RequestPropertyPlacement {
+            parcel_id,
+            land_nft_id,
+            building_nft_id,
+            x: position.x,
+            y: position.y,
+        });
+    }
+
+    pub fn request_property_parcels(&mut self) {
+        self.send_msg(ClientGeneral::RequestPropertyParcels);
+    }
+
+    pub fn request_property_purchase(&mut self, parcel_id: String) {
+        self.send_msg(ClientGeneral::RequestPropertyPurchase { parcel_id });
+    }
+
+    pub fn request_vgld_account(&mut self) { self.send_msg(ClientGeneral::RequestVgldAccount); }
+
+    pub fn request_vgld_deposit(&mut self, transaction_id: String) {
+        self.send_msg(ClientGeneral::RequestVgldDeposit { transaction_id });
     }
 
     fn send_msg<S>(&mut self, msg: S)
@@ -2250,29 +2377,6 @@ impl Client {
         self.send_msg(ClientGeneral::Command(name, args));
     }
 
-    pub fn request_wallet_challenge(&mut self) {
-        self.send_msg(ClientGeneral::RequestWalletChallenge);
-    }
-
-    pub fn associate_wallet(&mut self, wallet: String, signature: String) {
-        self.send_msg(ClientGeneral::AssociateWallet { wallet, signature });
-    }
-
-    pub fn request_property_placement(
-        &mut self,
-        land_id: String,
-        building_token_id: String,
-        position: Vec3<i32>,
-        rotation: f32,
-    ) {
-        self.send_msg(ClientGeneral::RequestPropertyPlacement {
-            land_id,
-            building_token_id,
-            position,
-            rotation,
-        });
-    }
-
     /// Remove all cached terrain
     pub fn clear_terrain(&mut self) {
         self.state.clear_terrain();
@@ -2702,17 +2806,6 @@ impl Client {
                 DisconnectReason::Kicked(reason) => return Err(Error::Kicked(reason)),
                 DisconnectReason::Banned(info) => return Err(Error::Banned(info)),
             },
-            ServerGeneral::WalletAssociationChallenge(message) => {
-                info!("Received wallet association challenge: {message}");
-            },
-            ServerGeneral::WalletAssociationResult(result) => match result {
-                Ok(()) => info!("Wallet association succeeded"),
-                Err(error) => warn!("Wallet association failed: {error}"),
-            },
-            ServerGeneral::PropertyPlacementResult(result) => match result {
-                Ok(()) => info!("Property placement authorized"),
-                Err(error) => warn!("Property placement rejected: {error}"),
-            },
             ServerGeneral::PlayerListUpdate(PlayerListUpdate::Init(list)) => {
                 self.player_list = list
             },
@@ -2911,6 +3004,56 @@ impl Client {
                 let plugin_len = d.len();
                 tracing::info!(?plugin_len, "plugin data");
                 frontend_events.push(Event::PluginDataReceived(d));
+            },
+            ServerGeneral::WalletChallenge { challenge } => {
+                frontend_events.push(Event::WalletChallenge(challenge));
+            },
+            ServerGeneral::WalletLinkResult { success, message } => {
+                frontend_events.push(Event::WalletLinkResult { success, message });
+            },
+            ServerGeneral::PropertyPlacementResult {
+                success,
+                parcel_id,
+                x,
+                y,
+                building_type,
+                message,
+            } => {
+                frontend_events.push(Event::PropertyPlacementResult {
+                    success,
+                    parcel_id,
+                    x,
+                    y,
+                    building_type,
+                    message,
+                });
+            },
+            ServerGeneral::PropertyParcels(parcels) => {
+                frontend_events.push(Event::PropertyParcels(parcels));
+            },
+            ServerGeneral::PropertyPurchaseResult {
+                parcel_id,
+                state,
+                message,
+            } => {
+                frontend_events.push(Event::PropertyPurchaseResult {
+                    parcel_id,
+                    state,
+                    message,
+                });
+            },
+            ServerGeneral::VgldAccount {
+                wallet,
+                balance_base_units,
+                decimals,
+                status,
+            } => {
+                frontend_events.push(Event::VgldAccount {
+                    wallet,
+                    balance_base_units,
+                    decimals,
+                    status,
+                });
             },
             ServerGeneral::SetPlayerRole(role) => {
                 debug!(?role, "Updating client role");

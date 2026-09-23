@@ -162,6 +162,7 @@ pub enum Event {
         password: String,
         server_address: String,
     },
+    Web3Login,
     CancelLoginAttempt,
     ChangeLanguage(LanguageMetadata),
     #[cfg(feature = "singleplayer")]
@@ -274,6 +275,7 @@ enum Message {
     #[cfg(feature = "singleplayer")]
     WorldConfirmation(world_selector::Confirmation),
     Multiplayer,
+    Web3Login,
     UnlockServerField,
     LanguageChanged(usize),
     OpenLanguageMenu,
@@ -540,12 +542,14 @@ impl Controls {
                     connection_state: ConnectionState::InProgress,
                     init_stage: DetailedInitializationStage::StartingMultiplayer,
                 };
-
                 events.push(Event::LoginAttempt {
                     username: self.login_info.username.trim().to_string(),
                     password: self.login_info.password.clone(),
                     server_address: self.login_info.server.trim().to_string(),
                 });
+            },
+            Message::Web3Login => {
+                events.push(Event::Web3Login);
             },
             Message::UnlockServerField => self.server_field_locked = false,
             Message::Username(new_value) => self.login_info.username = new_value,

@@ -205,9 +205,6 @@ pub enum ServerGeneral {
     /// A message to go into the client chat box. The client is responsible for
     /// formatting the message and turning it into a speech bubble.
     ChatMsg(comp::ChatMsg),
-    WalletAssociationChallenge(String),
-    WalletAssociationResult(Result<(), String>),
-    PropertyPlacementResult(Result<(), String>),
     ChatMode(comp::ChatMode),
     SetPlayerEntity(Uid),
     TimeOfDay(TimeOfDay, Calendar, Time, TimeScale),
@@ -218,6 +215,33 @@ pub enum ServerGeneral {
     Disconnect(DisconnectReason),
     /// Send a popup notification such as "Waypoint Saved"
     Notification(Notification),
+    WalletChallenge {
+        challenge: String,
+    },
+    WalletLinkResult {
+        success: bool,
+        message: String,
+    },
+    PropertyPlacementResult {
+        success: bool,
+        parcel_id: String,
+        x: i32,
+        y: i32,
+        building_type: Option<String>,
+        message: String,
+    },
+    PropertyParcels(Vec<PropertyParcelInfo>),
+    PropertyPurchaseResult {
+        parcel_id: String,
+        state: PropertyPurchaseState,
+        message: String,
+    },
+    VgldAccount {
+        wallet: Option<String>,
+        balance_base_units: u64,
+        decimals: u8,
+        status: String,
+    },
     UpdatePendingTrade(TradeId, PendingTrade, Option<SitePrices>),
     FinishedTrade(TradeResult),
     /// Economic information about sites
@@ -235,6 +259,48 @@ pub enum ServerGeneral {
     UpdateRecipes,
     SetPlayerRole(Option<AdminRole>),
     Gizmos(Vec<Gizmos>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PropertyPurchaseState {
+    Unavailable,
+    Pending,
+    Owned,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PropertyPlacementLocation {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyParcelInfo {
+    pub id: String,
+    pub name: String,
+    pub world_id: String,
+    pub continent: String,
+    pub region: String,
+    pub land_type: String,
+    pub rarity: String,
+    pub terrain_type: String,
+    pub water_access: bool,
+    pub road_access: bool,
+    pub size_label: String,
+    pub price_lamports: u64,
+    pub price_vgld_base_units: u64,
+    pub status: String,
+    pub protected: bool,
+    pub is_owned: bool,
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+    pub allowed_buildings: Vec<String>,
+    pub max_buildings: u32,
+    pub placed_buildings: u32,
+    pub placed_positions: Vec<PropertyPlacementLocation>,
 }
 
 impl ServerGeneral {
@@ -389,9 +455,6 @@ impl ServerMsg {
                         // Always possible
                         ServerGeneral::PlayerListUpdate(_)
                         | ServerGeneral::ChatMsg(_)
-                        | ServerGeneral::WalletAssociationChallenge(_)
-                        | ServerGeneral::WalletAssociationResult(_)
-                        | ServerGeneral::PropertyPlacementResult(_)
                         | ServerGeneral::ChatMode(_)
                         | ServerGeneral::SetPlayerEntity(_)
                         | ServerGeneral::TimeOfDay(_, _, _, _)
@@ -402,7 +465,13 @@ impl ServerMsg {
                         | ServerGeneral::Disconnect(_)
                         | ServerGeneral::Notification(_)
                         | ServerGeneral::SetPlayerRole(_)
-                        | ServerGeneral::LodZoneUpdate { .. } => true,
+                        | ServerGeneral::LodZoneUpdate { .. }
+                        | ServerGeneral::WalletChallenge { .. }
+                        | ServerGeneral::WalletLinkResult { .. }
+                        | ServerGeneral::PropertyPlacementResult { .. }
+                        | ServerGeneral::PropertyParcels(_)
+                        | ServerGeneral::PropertyPurchaseResult { .. }
+                        | ServerGeneral::VgldAccount { .. } => true,
                         ServerGeneral::PluginData(_) => true,
                     }
             },

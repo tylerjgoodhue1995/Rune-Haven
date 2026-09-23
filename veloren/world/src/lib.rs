@@ -191,14 +191,7 @@ impl World {
                     .civs()
                     .sites
                     .values()
-                    .filter_map(|site| {
-                        let marker = if site.macro_city {
-                            MarkerKind::City
-                        } else {
-                            site.kind.marker()?
-                        };
-                        Some((marker, site))
-                    })
+                    .filter_map(|site| Some((site.kind.marker()?, site)))
                     .map(|(marker, site)| {
                         Marker::at(
                             (site.center * TerrainChunkSize::RECT_SIZE.map(|e| e as i32)).as_(),

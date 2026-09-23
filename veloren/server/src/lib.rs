@@ -33,6 +33,7 @@ pub mod sys;
 #[cfg(feature = "persistent_world")]
 pub mod terrain_persistence;
 #[cfg(not(feature = "worldgen"))] mod test_world;
+pub mod vgld;
 
 #[cfg(feature = "worldgen")] mod weather;
 
@@ -60,7 +61,6 @@ use crate::{
     login_provider::LoginProvider,
     persistence::PersistedComponents,
     presence::{RegionSubscription, RepositionToFreeSpace},
-    property::PropertyRuntime,
     state_ext::StateExt,
     sys::sentinel::DeletedEntities,
 };
@@ -127,7 +127,9 @@ pub use world::{WorldGenerateStage, civ::WorldCivStage, sim::WorldSimStage};
 
 use crate::{
     persistence::{DatabaseSettings, SqlLogMode},
+    property::PropertyRuntime,
     sys::terrain,
+    vgld::{VgldConfig, VgldLedger},
 };
 use hashbrown::HashMap;
 use std::sync::RwLock;
@@ -312,8 +314,8 @@ impl Server {
                 world_file: if let Some(ref opts) = settings.map_file {
                     opts.clone()
                 } else {
-                    // Load default map from assets.
-                    FileOpts::LoadAsset(DEFAULT_WORLD_MAP.into())
+                    // Generate the configured geography when no map override is provided.
+                    FileOpts::Generate(GenOpts::default())
                 },
                 calendar: Some(settings.calendar_mode.calendar_now()),
             },
@@ -369,12 +371,20 @@ impl Server {
         events::register_event_busses(state.ecs_mut());
         state.ecs_mut().insert(battlemode_buffer);
         state.ecs_mut().insert(RecentClientIPs::default());
+        state
+            .ecs_mut()
+            .insert(PropertyRuntime::with_persistence_path(
+                data_dir.join("property_placements.json"),
+            ));
+        state.ecs_mut().insert(VgldLedger::with_persistence_path(
+            data_dir.join("vgld_ledger.json"),
+        ));
+        state.ecs_mut().insert(VgldConfig::from_env());
         state.ecs_mut().insert(settings.clone());
         state.ecs_mut().insert(editable_settings);
         state.ecs_mut().insert(DataDir {
             path: data_dir.to_owned(),
         });
-        state.ecs_mut().insert(PropertyRuntime::default());
 
         state.ecs_mut().insert(Vec::<ChunkRequest>::new());
         state

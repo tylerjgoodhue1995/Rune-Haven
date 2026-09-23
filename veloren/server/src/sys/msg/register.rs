@@ -1,8 +1,9 @@
 use crate::{
     EditableSettings, Settings,
     client::Client,
-    login_provider::{LoginProvider, PendingLogin},
+    login_provider::{LoginProvider, PendingLogin, is_admin_wallet},
     metrics::PlayerMetrics,
+    property::PropertyRuntime,
     settings::{BanOperation, banlist::NormalizedIpAddr},
     sys::sentinel::TrackedStorages,
 };
@@ -64,6 +65,7 @@ impl<'a> System<'a> for Sys {
         WriteStorage<'a, Player>,
         WriteStorage<'a, PendingLogin>,
         WriteExpect<'a, EditableSettings>,
+        WriteExpect<'a, PropertyRuntime>,
     );
 
     const NAME: &'static str = "msg::register";
@@ -72,7 +74,14 @@ impl<'a> System<'a> for Sys {
 
     fn run(
         _job: &mut Job<Self>,
-        (read_data, mut clients, mut players, mut pending_logins, mut editable_settings): Self::SystemData,
+        (
+            read_data,
+            mut clients,
+            mut players,
+            mut pending_logins,
+            mut editable_settings,
+            mut property_runtime,
+        ): Self::SystemData,
     ) {
         let mut make_admin_emitter = read_data.make_admin_events.emitter();
         // Player list to send new players, and lookup from UUID to entity (so we don't
@@ -136,9 +145,42 @@ impl<'a> System<'a> for Sys {
         for (entity, client) in (&read_data.entities, &mut clients).join() {
             let mut locale = None;
 
+            info!(?entity, "processing client registration stream");
             let _ = super::try_recv_all(client, 0, |_, msg: ClientRegister| {
                 trace!(?msg.token_or_username, "defer auth lockup");
-                let pending = read_data.login_provider.verify(&msg.token_or_username);
+                info!("received client registration");
+                let pending = match msg.wallet_login {
+                    Some(wallet_login) => match LoginProvider::verify_wallet(
+                        &wallet_login.wallet,
+                        &wallet_login.challenge,
+                        &wallet_login.signature,
+                    ) {
+                        Ok((username, uuid)) => {
+                            property_runtime
+                                .link_verified_wallet(&uuid.to_string(), &wallet_login.wallet);
+                            property_runtime.register_development_nfts(&wallet_login.wallet);
+                            
+                            // Auto-grant admin rights to the admin wallet
+                            if is_admin_wallet(&wallet_login.wallet) {
+                                info!(wallet = ?wallet_login.wallet, "Auto-granting admin rights to admin wallet");
+                                // Emit MakeAdminEvent to grant admin rights
+                                make_admin_emitter.emit(common::event::MakeAdminEvent {
+                                    entity,
+                                    admin: common::comp::Admin(common::comp::AdminRole::Admin),
+                                    uuid,
+                                });
+                            }
+                            
+                            info!("wallet registration verified");
+                            PendingLogin::new_success(username, uuid)
+                        },
+                        Err(error) => {
+                            warn!(?error, "wallet registration rejected");
+                            PendingLogin::new_error(error)
+                        },
+                    },
+                    None => read_data.login_provider.verify(&msg.token_or_username),
+                };
                 locale = msg.locale;
                 let _ = pending_logins.insert(entity, pending);
                 Ok(())

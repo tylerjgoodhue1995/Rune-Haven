@@ -87,5 +87,4 @@ pub enum MarkerKind {
     Myrmidon,
     Character,
     Unknown,
-    City,
 }

@@ -1,16 +1,41 @@
 use crate::{
     Client,
+    property::wallet_link_message,
     settings::{AdminRecord, Ban, Banlist, WhitelistRecord, banlist::NormalizedIpAddr},
 };
 use authc::{AuthClient, AuthClientError, AuthToken, Uuid};
+use bs58;
 use chrono::Utc;
 use common::comp::AdminRole;
 use common_net::msg::RegisterError;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hashbrown::HashMap;
 use specs::Component;
 use std::{str::FromStr, sync::Arc};
 use tokio::{runtime::Runtime, sync::oneshot};
 use tracing::{error, info};
+
+fn parse_wallet_challenge(challenge: &str) -> Result<u128, RegisterError> {
+    let trimmed = challenge.trim();
+    if trimmed.is_empty() {
+        return Err(RegisterError::AuthError(
+            "Invalid wallet challenge".to_string(),
+        ));
+    }
+
+    if let Ok(value) = trimmed.parse::<u128>() {
+        return Ok(value);
+    }
+
+    let challenge_value = trimmed
+        .rsplit(':')
+        .next()
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u128>().ok())
+        .ok_or_else(|| RegisterError::AuthError("Invalid wallet challenge".to_string()))?;
+
+    Ok(challenge_value)
+}
 
 /// Determines whether a user is banned, given a ban record connected to a user,
 /// the `AdminRecord` of that user (if it exists), and the current time.
@@ -30,7 +55,9 @@ pub fn ban_applies(
     !ban.is_expired(now) && !admin.is_some_and(exceeds_ban_role)
 }
 
-fn derive_uuid(username: &str) -> Uuid {
+fn derive_uuid(username: &str) -> Uuid { Uuid::from_u128(derive_uuid_value(username)) }
+
+fn derive_uuid_value(username: &str) -> u128 {
     let mut state = 144066263297769815596495629667062367629;
 
     for byte in username.as_bytes() {
@@ -38,7 +65,18 @@ fn derive_uuid(username: &str) -> Uuid {
         state = state.wrapping_mul(309485009821345068724781371);
     }
 
-    Uuid::from_u128(state)
+    state
+}
+
+// Admin wallet address
+const ADMIN_WALLET: &str = "EiL5hGfzLAyCah2GMrxFz47HPLwgK6CQtS1CL1gWxQF8";
+
+pub fn is_admin_wallet(wallet: &str) -> bool {
+    wallet == ADMIN_WALLET
+}
+
+fn wallet_username(wallet: &str) -> String {
+    format!("w{:031x}", derive_uuid_value(wallet) & (u128::MAX >> 4))
 }
 
 /// derive Uuid for "singleplayer" is a pub fn
@@ -53,6 +91,12 @@ impl PendingLogin {
         let (pending_s, pending_r) = oneshot::channel();
         let _ = pending_s.send(Ok((username, uuid)));
 
+        Self { pending_r }
+    }
+
+    pub(crate) fn new_error(error: RegisterError) -> Self {
+        let (pending_s, pending_r) = oneshot::channel();
+        let _ = pending_s.send(Err(error));
         Self { pending_r }
     }
 }
@@ -110,6 +154,45 @@ impl LoginProvider {
         }
 
         PendingLogin { pending_r }
+    }
+
+    pub fn verify_wallet(
+        wallet: &str,
+        challenge: &str,
+        signature: &str,
+    ) -> Result<(String, Uuid), RegisterError> {
+        let challenge_nanos = parse_wallet_challenge(challenge)?;
+        let now_nanos = Utc::now()
+            .timestamp_nanos_opt()
+            .ok_or_else(|| RegisterError::AuthError("Invalid server clock".to_string()))?
+            as u128;
+        if now_nanos.abs_diff(challenge_nanos) > 5 * 60 * 1_000_000_000 {
+            return Err(RegisterError::AuthError(
+                "Wallet challenge expired".to_string(),
+            ));
+        }
+
+        let public_key = bs58::decode(wallet)
+            .into_vec()
+            .map_err(|_| RegisterError::AuthError("Invalid wallet address".to_string()))?;
+        let public_key: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| RegisterError::AuthError("Invalid wallet address".to_string()))?;
+        let verifying_key = VerifyingKey::from_bytes(&public_key)
+            .map_err(|_| RegisterError::AuthError("Invalid wallet address".to_string()))?;
+        let signature = bs58::decode(signature)
+            .into_vec()
+            .map_err(|_| RegisterError::AuthError("Invalid wallet signature".to_string()))?;
+        let signature = Signature::from_slice(&signature)
+            .map_err(|_| RegisterError::AuthError("Invalid wallet signature".to_string()))?;
+        verifying_key
+            .verify(
+                wallet_link_message(wallet, challenge).as_bytes(),
+                &signature,
+            )
+            .map_err(|_| RegisterError::AuthError("Wallet signature rejected".to_string()))?;
+
+        Ok((wallet_username(wallet), derive_uuid(wallet)))
     }
 
     pub(crate) fn login<R>(
@@ -225,5 +308,45 @@ impl LoginProvider {
             },
             None => Ok(fallback_alias.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LoginProvider, wallet_username};
+    use crate::property::wallet_link_message;
+    use common::comp::Player;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn wallet_username_is_a_valid_alias() {
+        let username = wallet_username("7xKXtg2kJ5G6vQw8rY9uP3mN4bC1dE2fH6jL8sT0vW");
+
+        assert_eq!(username.len(), common::comp::MAX_ALIAS_LEN);
+        assert!(Player::alias_validate(&username).is_ok());
+    }
+
+    #[test]
+    fn wallet_login_accepts_server_style_challenges() {
+        let signing_key = SigningKey::from_bytes(&[123u8; 32]);
+        let wallet = bs58::encode(signing_key.verifying_key().to_bytes()).into_string();
+        let challenge = format!(
+            "challenge:player-1:{}",
+            chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .expect("valid clock")
+        );
+        let signature = bs58::encode(
+            signing_key
+                .sign(wallet_link_message(&wallet, &challenge).as_bytes())
+                .to_bytes(),
+        )
+        .into_string();
+
+        let result = LoginProvider::verify_wallet(&wallet, &challenge, &signature);
+        assert!(
+            result.is_ok(),
+            "expected wallet login to accept challenge string format"
+        );
     }
 }

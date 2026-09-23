@@ -325,9 +325,7 @@ pub struct LoginBanner {
     pub password: text_input::State,
     pub server: text_input::State,
 
-    multiplayer_button: button::State,
-    #[cfg(feature = "singleplayer")]
-    singleplayer_button: button::State,
+    web3_button: button::State,
 
     unlock_server_field_button: button::State,
 }
@@ -389,37 +387,29 @@ impl LoginBanner {
 
         let banner_content = Column::with_children(vec![
             Column::with_children(vec![
-                BackgroundContainer::new(
-                    Image::new(imgs.input_bg)
-                        .width(Length::Units(INPUT_WIDTH))
-                        .fix_aspect_ratio(),
-                    TextInput::new(
-                        &mut self.username,
-                        &i18n.get_msg("main-username"),
-                        &login_info.username,
-                        Message::Username,
-                    )
-                    .size(input_text_size)
-                    .on_submit(Message::FocusPassword),
-                )
-                .padding(Padding::new().horizontal(7).top(5))
-                .into(),
-                BackgroundContainer::new(
-                    Image::new(imgs.input_bg)
-                        .width(Length::Units(INPUT_WIDTH))
-                        .fix_aspect_ratio(),
-                    TextInput::new(
-                        &mut self.password,
-                        &i18n.get_msg("main-password"),
-                        &login_info.password,
-                        Message::Password,
-                    )
-                    .size(input_text_size)
-                    .password()
-                    .on_submit(Message::Multiplayer),
-                )
-                .padding(Padding::new().horizontal(7).top(5))
-                .into(),
+                Text::new("WEB3 ACCESS")
+                    .size(fonts.cyri.scale(13))
+                    .width(Length::Fill)
+                    .horizontal_alignment(iced::HorizontalAlignment::Center)
+                    .into(),
+                Text::new("Use your Phantom wallet to sign in securely.")
+                    .size(fonts.cyri.scale(14))
+                    .width(Length::Fill)
+                    .horizontal_alignment(iced::HorizontalAlignment::Center)
+                    .into(),
+                neat_button(
+                    &mut self.web3_button,
+                    "Connect Phantom",
+                    FILL_FRAC_TWO,
+                    button_style,
+                    Some(Message::Web3Login),
+                ),
+                Text::new("No password required")
+                    .size(fonts.cyri.scale(12))
+                    .width(Length::Fill)
+                    .horizontal_alignment(iced::HorizontalAlignment::Center)
+                    .into(),
+                Space::new(Length::Fill, Length::Units(4)).into(),
                 BackgroundContainer::new(
                     Image::new(imgs.input_bg)
                         .width(Length::Units(INPUT_WIDTH))
@@ -430,28 +420,6 @@ impl LoginBanner {
                 .into(),
             ])
             .spacing(5)
-            .into(),
-            Space::new(Length::Fill, Length::Units(8)).into(),
-            Column::with_children(vec![
-                neat_button(
-                    &mut self.multiplayer_button,
-                    i18n.get_msg("common-multiplayer"),
-                    FILL_FRAC_TWO,
-                    button_style,
-                    Some(Message::Multiplayer),
-                ),
-                #[cfg(feature = "singleplayer")]
-                neat_button(
-                    &mut self.singleplayer_button,
-                    i18n.get_msg("common-singleplayer"),
-                    FILL_FRAC_TWO,
-                    button_style,
-                    Some(Message::Singleplayer),
-                ),
-            ])
-            .max_width(170)
-            .height(Length::Units(200))
-            .spacing(8)
             .into(),
         ])
         .width(Length::Fill)

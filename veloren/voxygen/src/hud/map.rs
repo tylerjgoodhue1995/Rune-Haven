@@ -45,6 +45,7 @@ widget_ids! {
         indicator,
         map_layers[],
         map_title,
+        marketplace_button,
         qlog_title,
         mmap_site_icons[],
         mmap_poi_icons[],
@@ -172,6 +173,7 @@ pub struct State {
 pub enum Event {
     SettingsChange(InterfaceChange),
     Close,
+    OpenPropertyMarketplace,
     RequestSiteInfo(SiteId),
     SetLocationMarker(Vec2<i32>),
     MapDrag(Vec2<f64>),
@@ -327,6 +329,19 @@ impl Widget for Map<'_> {
             .font_size(self.fonts.cyri.scale(29))
             .color(TEXT_COLOR)
             .set(state.ids.map_title, ui);
+
+        if Button::new()
+            .w_h(190.0, 34.0)
+            .top_right_with_margins_on(state.ids.frame, 8.0, 42.0)
+            .label("Property Marketplace")
+            .label_font_id(self.fonts.cyri.conrod_id)
+            .label_font_size(self.fonts.cyri.scale(14))
+            .label_color(TEXT_COLOR)
+            .set(state.ids.marketplace_button, ui)
+            .was_clicked()
+        {
+            events.push(Event::OpenPropertyMarketplace);
+        }
 
         // Questlog Title
         Text::new(&i18n.get_msg("hud-map-qlog_title"))
@@ -998,14 +1013,7 @@ impl Widget for Map<'_> {
             };
 
         for (i, marker) in markers.iter().enumerate() {
-            let rside = zoom as f32
-                * 8.0
-                * 1.2
-                * if matches!(marker.kind, MarkerKind::City) {
-                    1.45
-                } else {
-                    1.0
-                };
+            let rside = zoom as f32 * 8.0 * 1.2;
 
             let (rpos, fade) =
                 match wpos_to_rpos_fade(marker.wpos, Vec2::from(rside / 2.0), rside / 2.0) {
@@ -1021,7 +1029,6 @@ impl Widget for Map<'_> {
                 .unwrap_or_else(|| match &marker.kind {
                     MarkerKind::Unknown => i18n.get_msg("hud-map-unknown"),
                     MarkerKind::Town => i18n.get_msg("hud-map-town"),
-                    MarkerKind::City => i18n.get_msg("hud-map-town"),
                     MarkerKind::Castle => i18n.get_msg("hud-map-castle"),
                     MarkerKind::Cave => i18n.get_msg("hud-map-cave"),
                     MarkerKind::Tree => i18n.get_msg("hud-map-tree"),
@@ -1041,7 +1048,7 @@ impl Widget for Map<'_> {
                 });
             let (difficulty, desc) = match &marker.kind {
                 MarkerKind::Unknown => (None, i18n.get_msg("hud-map-unknown")),
-                MarkerKind::Town | MarkerKind::City => (None, i18n.get_msg("hud-map-town")),
+                MarkerKind::Town => (None, i18n.get_msg("hud-map-town")),
                 MarkerKind::Castle => (None, i18n.get_msg("hud-map-castle")),
                 MarkerKind::Cave => (None, i18n.get_msg("hud-map-cave")),
                 MarkerKind::Tree => (None, i18n.get_msg("hud-map-tree")),
@@ -1069,7 +1076,6 @@ impl Widget for Map<'_> {
             let site_btn = Button::image(match &marker.kind {
                 MarkerKind::Unknown => self.imgs.mmap_unknown,
                 MarkerKind::Town => self.imgs.mmap_site_town,
-                MarkerKind::City => self.imgs.mmap_site_castle,
                 MarkerKind::ChapelSite => self.imgs.mmap_site_sea_chapel,
                 MarkerKind::Terracotta => self.imgs.mmap_site_terracotta,
                 MarkerKind::Castle => self.imgs.mmap_site_castle,
@@ -1097,7 +1103,6 @@ impl Widget for Map<'_> {
             .hover_image(match &marker.kind {
                 MarkerKind::Unknown => self.imgs.mmap_unknown_hover,
                 MarkerKind::Town => self.imgs.mmap_site_town_hover,
-                MarkerKind::City => self.imgs.mmap_site_castle_hover,
                 MarkerKind::ChapelSite => self.imgs.mmap_site_sea_chapel_hover,
                 MarkerKind::Terracotta => self.imgs.mmap_site_terracotta_hover,
                 MarkerKind::Castle => self.imgs.mmap_site_castle_hover,
@@ -1160,7 +1165,6 @@ impl Widget for Map<'_> {
                 _ if marker.flags.contains(MarkerFlags::IS_QUEST) => show_quests,
                 MarkerKind::Unknown => true,
                 MarkerKind::Town => show_towns,
-                MarkerKind::City => true,
                 MarkerKind::Gnarling
                 | MarkerKind::ChapelSite
                 | MarkerKind::DwarvenMine
@@ -1232,8 +1236,11 @@ impl Widget for Map<'_> {
                     MarkerKind::Unknown | MarkerKind::Character => {
                         dif_img.set(state.ids.site_difs[i], ui)
                     },
-                    MarkerKind::Town => {},
-                    MarkerKind::City => dif_img.set(state.ids.site_difs[i], ui),
+                    MarkerKind::Town => {
+                        if show_towns {
+                            dif_img.set(state.ids.site_difs[i], ui)
+                        }
+                    },
                     MarkerKind::Gnarling
                     | MarkerKind::ChapelSite
                     | MarkerKind::Haniwa

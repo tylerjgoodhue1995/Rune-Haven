@@ -4,7 +4,7 @@ use futures_util::future::FutureExt;
 use network::{Network, Participant, Promises};
 use std::time::Duration;
 use tokio::{runtime::Runtime, select, sync::oneshot};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 pub(crate) struct ServerInfoPacket {
     pub info: ServerInfo,
@@ -128,6 +128,7 @@ impl ConnectionHandler {
 
         let server_data = receiver.recv()?;
 
+        info!("sending server info");
         register_stream.send(server_data.info)?;
 
         const TIMEOUT: Duration = Duration::from_secs(5);
@@ -141,6 +142,7 @@ impl ConnectionHandler {
             },
             Some(client_type) => client_type?,
         };
+        info!("received client type");
 
         use network::ParticipantEvent;
         let connected_from = match select!(

@@ -291,6 +291,34 @@ impl PlayState for CharSelectionState {
                             client::Event::CharacterJoined(metadata) => {
                                 join_metadata = Some(metadata);
                             },
+                            client::Event::WalletChallenge(challenge) => {
+                                tracing::info!(
+                                    challenge = %challenge,
+                                    "Received wallet-link challenge"
+                                );
+                            },
+                            client::Event::WalletLinkResult { success, message } => {
+                                if success {
+                                    global_state.info_message = Some(message);
+                                } else {
+                                    self.char_selection_ui.display_error(message);
+                                }
+                            },
+                            client::Event::PropertyPlacementResult {
+                                success,
+                                parcel_id,
+                                message,
+                                ..
+                            } => {
+                                if success {
+                                    global_state.info_message =
+                                        Some(format!("{parcel_id}: {message}"));
+                                } else {
+                                    self.char_selection_ui
+                                        .display_error(format!("{parcel_id}: {message}"));
+                                }
+                            },
+                            client::Event::PropertyParcels(_) => {},
                             #[cfg_attr(not(feature = "plugins"), expect(unused_variables))]
                             client::Event::PluginDataReceived(data) => {
                                 #[cfg(feature = "plugins")]

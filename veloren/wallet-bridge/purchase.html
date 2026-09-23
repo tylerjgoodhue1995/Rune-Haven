@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Veloren property purchase</title>
+<style>
+  body { background: #17130f; color: #eee; font: 16px sans-serif; margin: 3rem auto; max-width: 36rem; }
+  button { font: inherit; padding: .7rem 1rem; }
+</style>
+<h1>Confirm property purchase</h1>
+<p id="status">This page never receives or stores your private key.</p>
+<button id="purchase">Connect wallet and purchase</button>
+<script src="https://unpkg.com/@solana/web3.js@1.98.4/lib/index.iife.min.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  const parcelId = params.get("parcel_id");
+  const apiUrl = params.get("api_url") || "http://127.0.0.1:19254";
+  const callback = "http://127.0.0.1:38292/callback";
+  const status = document.getElementById("status");
+
+  function getPhantomProvider() {
+    const provider = window.phantom?.solana || window.solana;
+    return provider?.isPhantom ? provider : null;
+  }
+
+  function setStatus(message) {
+    status.textContent = message;
+  }
+
+  document.getElementById("purchase").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    if (!parcelId) {
+      setStatus("Missing parcel ID. Close this tab and reopen the purchase page from the game.");
+      return;
+    }
+    const provider = getPhantomProvider();
+    if (!provider) {
+      setStatus(
+        "Phantom was not detected. Install the Phantom browser extension, " +
+        "unlock it, then reload this page."
+      );
+      return;
+    }
+
+    button.disabled = true;
+    try {
+      setStatus("Connecting to Phantom...");
+      const { publicKey } = await provider.connect();
+      const wallet = publicKey.toString();
+      setStatus("Preparing the purchase...");
+      const intent = await fetch(`${apiUrl}/marketplace/${encodeURIComponent(parcelId)}/purchase`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ buyer: wallet })
+      });
+      if (!intent.ok) throw new Error(await intent.text());
+      const purchase = await intent.json();
+      const raw = Uint8Array.from(atob(purchase.partially_signed_transaction), c => c.charCodeAt(0));
+      const transaction = solanaWeb3.Transaction.from(raw);
+      status.textContent = "Waiting for wallet approval...";
+      const result = await provider.signAndSendTransaction(transaction);
+      const signature = result.signature;
+      status.textContent = "Confirming the purchase...";
+      const confirmed = await fetch(`${apiUrl}/marketplace/${encodeURIComponent(parcelId)}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ buyer: wallet, signature })
+      });
+      if (!confirmed.ok) throw new Error(await confirmed.text());
+      const confirmedPurchase = await confirmed.json();
+      if (!confirmedPurchase.verified) throw new Error(confirmedPurchase.message);
+      await fetch(callback, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wallet, parcel_id: parcelId, signature })
+      });
+      status.textContent = "Property acquired. You can close this tab.";
+    } catch (error) {
+      setStatus(`Purchase failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>

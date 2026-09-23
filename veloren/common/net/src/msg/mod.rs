@@ -6,7 +6,7 @@ pub mod world_msg;
 
 // Reexports
 pub use self::{
-    client::{ClientGeneral, ClientMsg, ClientRegister, ClientType},
+    client::{ClientGeneral, ClientMsg, ClientRegister, ClientType, WalletLogin},
     compression::{
         CompressedData, GridLtrPacking, PackingFormula, QuadPngEncoding, TriPngEncoding,
         VoxelImageEncoding, WidePacking, WireChonk,
@@ -14,8 +14,9 @@ pub use self::{
     ecs_packet::EcsCompPacket,
     server::{
         CharacterInfo, ChatTypeContext, DisconnectReason, InviteAnswer, Notification, PlayerInfo,
-        PlayerListUpdate, RegisterError, SerializedTerrainChunk, ServerGeneral, ServerInfo,
-        ServerInit, ServerMsg, ServerRegisterAnswer,
+        PlayerListUpdate, PropertyParcelInfo, PropertyPlacementLocation, PropertyPurchaseState,
+        RegisterError, SerializedTerrainChunk, ServerGeneral, ServerInfo, ServerInit, ServerMsg,
+        ServerRegisterAnswer,
     },
     world_msg::WorldMapMsg,
 };

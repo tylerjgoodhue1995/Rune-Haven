@@ -67,6 +67,15 @@ impl ClientType {
 pub struct ClientRegister {
     pub token_or_username: String,
     pub locale: Option<String>,
+    #[serde(default)]
+    pub wallet_login: Option<WalletLogin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletLogin {
+    pub wallet: String,
+    pub challenge: String,
+    pub signature: String,
 }
 
 /// Messages sent from the client to the server
@@ -109,6 +118,27 @@ pub enum ClientGeneral {
     RequestSiteInfo(SiteId),
     UpdateMapMarker(comp::MapMarkerChange),
     SetBattleMode(BattleMode),
+    RequestWalletChallenge,
+    LinkWallet {
+        wallet: String,
+        challenge: String,
+        signature: String,
+    },
+    RequestPropertyPlacement {
+        parcel_id: String,
+        land_nft_id: String,
+        building_nft_id: String,
+        x: i32,
+        y: i32,
+    },
+    RequestPropertyParcels,
+    RequestPropertyPurchase {
+        parcel_id: String,
+    },
+    RequestVgldAccount,
+    RequestVgldDeposit {
+        transaction_id: String,
+    },
 
     SpectatePosition(Vec3<f32>),
     SpectateEntity(Option<common::uid::Uid>),
@@ -123,17 +153,6 @@ pub enum ClientGeneral {
     //Always possible
     ChatMsg(comp::Content),
     Command(String, Vec<String>),
-    RequestWalletChallenge,
-    AssociateWallet {
-        wallet: String,
-        signature: String,
-    },
-    RequestPropertyPlacement {
-        land_id: String,
-        building_token_id: String,
-        position: Vec3<i32>,
-        rotation: f32,
-    },
     Terminate,
     RequestPlayerPhysics {
         server_authoritative: bool,
@@ -184,18 +203,21 @@ impl ClientMsg {
                         | ClientGeneral::RequestPlayerPhysics { .. }
                         | ClientGeneral::RequestLossyTerrainCompression { .. }
                         | ClientGeneral::UpdateMapMarker(_)
-                        | ClientGeneral::SetBattleMode(_) => {
+                        | ClientGeneral::SetBattleMode(_)
+                        | ClientGeneral::RequestWalletChallenge
+                        | ClientGeneral::LinkWallet { .. }
+                        | ClientGeneral::RequestPropertyPlacement { .. }
+                        | ClientGeneral::RequestPropertyParcels
+                        | ClientGeneral::RequestPropertyPurchase { .. }
+                        | ClientGeneral::RequestVgldAccount
+                        | ClientGeneral::RequestVgldDeposit { .. } => {
                             c_type == ClientType::Game && presence.is_some()
                         },
                         ClientGeneral::SpectatePosition(_) | ClientGeneral::SpectateEntity(_) => {
                             c_type.can_spectate() && presence.is_some()
-                        },
-                        ClientGeneral::ChatMsg(_) => {
+                        },                        ClientGeneral::ChatMsg(_) => {
                             c_type.can_send_message()
                         },
-                        ClientGeneral::RequestWalletChallenge
-                        | ClientGeneral::AssociateWallet { .. }
-                        | ClientGeneral::RequestPropertyPlacement { .. } => true,
                         //Always possible
                         ClientGeneral::Command(_, _)
                         | ClientGeneral::Terminate

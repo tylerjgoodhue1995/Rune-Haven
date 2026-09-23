@@ -11,6 +11,9 @@ use vek::*;
 pub enum DebugShape {
     /// [Start, End], width
     Line([Vec3<f32>; 2], f32),
+    Box {
+        size: Vec3<f32>,
+    },
     Cylinder {
         radius: f32,
         height: f32,
@@ -126,6 +129,39 @@ impl DebugShape {
                     [1.0; 4],
                     &mut mesh,
                 );
+            },
+            DebugShape::Box { size } => {
+                let half = *size / 2.0;
+                let corners = [
+                    Vec3::new(-half.x, -half.y, -half.z),
+                    Vec3::new(half.x, -half.y, -half.z),
+                    Vec3::new(half.x, half.y, -half.z),
+                    Vec3::new(-half.x, half.y, -half.z),
+                    Vec3::new(-half.x, -half.y, half.z),
+                    Vec3::new(half.x, -half.y, half.z),
+                    Vec3::new(half.x, half.y, half.z),
+                    Vec3::new(-half.x, half.y, half.z),
+                ];
+
+                let faces = [
+                    (0, 1, 2, 3),
+                    (4, 5, 6, 7),
+                    (0, 1, 5, 4),
+                    (1, 2, 6, 5),
+                    (2, 3, 7, 6),
+                    (3, 0, 4, 7),
+                ];
+
+                for (a, b, c, d) in faces {
+                    let [a, b, c, d] = [corners[a], corners[b], corners[c], corners[d]];
+                    let normal = (b - a).cross(c - b).normalized();
+                    mesh.push_quad(Quad::<DebugVertex>::new(
+                        (a, [1.0; 4], normal).into(),
+                        (b, [1.0; 4], normal).into(),
+                        (c, [1.0; 4], normal).into(),
+                        (d, [1.0; 4], normal).into(),
+                    ));
+                }
             },
             DebugShape::Cylinder { radius, height } => {
                 const SUBDIVISIONS: u8 = 16;

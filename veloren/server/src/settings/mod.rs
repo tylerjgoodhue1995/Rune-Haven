@@ -32,7 +32,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tracing::{error, warn};
-use world::sim::{DEFAULT_WORLD_SEED, FileOpts};
+use world::sim::FileOpts;
 
 use self::server_physics::ServerPhysicsForceList;
 
@@ -221,7 +221,7 @@ impl Default for Settings {
             ],
             auth_server_address: Some("http://localhost:19253".into()),
             query_address: Some(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 14006))),
-            world_seed: DEFAULT_WORLD_SEED,
+            world_seed: 130626853, // Fixed seed for three-continent map
             server_name: "Veloren Server".into(),
             max_players: 100,
             day_length: DAY_LENGTH_DEFAULT,
@@ -272,8 +272,56 @@ impl Settings {
             default_settings
         };
 
+        settings.apply_environment_overrides();
         settings.validate();
         settings
+    }
+
+    fn apply_environment_overrides(&mut self) {
+        let environment = std::env::var("VELOREN_ENVIRONMENT")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase());
+        let auth_mode = std::env::var("VELOREN_AUTH_MODE")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase());
+
+        let environment = environment.as_deref();
+        let effective_auth_mode = auth_mode
+            .as_deref()
+            .or_else(|| match environment {
+                Some("dev") => Some("wallet"),
+                Some("beta") | Some("prod") => Some("remote"),
+                _ => None,
+            })
+            .unwrap_or("local");
+
+        match effective_auth_mode {
+            "none" | "no-auth" | "disabled" | "wallet" | "local-wallet" => {
+                self.auth_server_address = None;
+            },
+            "remote" => {
+                if let Ok(url) = std::env::var("VELOREN_AUTH_SERVER_URL") {
+                    self.auth_server_address = Some(url);
+                }
+            },
+            _ => {},
+        }
+
+        if let Ok(name) = std::env::var("VELOREN_SERVER_NAME") {
+            self.server_name = name;
+        }
+
+        if let Ok(max_players) = std::env::var("VELOREN_MAX_PLAYERS") {
+            if let Ok(max_players) = max_players.parse::<u16>() {
+                self.max_players = max_players;
+            }
+        }
+
+        if let Ok(url) = std::env::var("VELOREN_AUTH_SERVER_URL") {
+            if matches!(environment, Some("beta") | Some("prod")) || auth_mode.is_some() {
+                self.auth_server_address = Some(url);
+            }
+        }
     }
 
     fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
@@ -300,12 +348,8 @@ impl Settings {
                 )),
             }],
             auth_server_address: None,
-            // If loading the default map file, make sure the seed is also default.
-            world_seed: if load.map_file.is_some() {
-                load.world_seed
-            } else {
-                DEFAULT_WORLD_SEED
-            },
+            // Use fixed seed for three-continent map
+            world_seed: 130626853,
             server_name: SINGLEPLAYER_SERVER_NAME.to_owned(),
             max_players: 100,
             max_view_distance: None,

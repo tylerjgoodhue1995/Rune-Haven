@@ -136,9 +136,6 @@ impl Client {
                     // Always possible
                     ServerGeneral::PlayerListUpdate(_)
                     | ServerGeneral::ChatMsg(_)
-                    | ServerGeneral::WalletAssociationChallenge(_)
-                    | ServerGeneral::WalletAssociationResult(_)
-                    | ServerGeneral::PropertyPlacementResult(_)
                     | ServerGeneral::ChatMode(_)
                     | ServerGeneral::SetPlayerEntity(_)
                     | ServerGeneral::TimeOfDay(_, _)
@@ -227,11 +224,14 @@ impl Client {
                     | ServerGeneral::DeleteEntity(_)
                     | ServerGeneral::Disconnect(_)
                     | ServerGeneral::Notification(_)
+                    | ServerGeneral::WalletChallenge { .. }
+                    | ServerGeneral::WalletLinkResult { .. }
+                    | ServerGeneral::PropertyPlacementResult { .. }
+                    | ServerGeneral::PropertyParcels(_)
+                    | ServerGeneral::PropertyPurchaseResult { .. }
+                    | ServerGeneral::VgldAccount { .. }
                     | ServerGeneral::SetPlayerRole(_)
-                    | ServerGeneral::PluginData(_)
-                    | ServerGeneral::WalletAssociationChallenge(_)
-                    | ServerGeneral::WalletAssociationResult(_)
-                    | ServerGeneral::PropertyPlacementResult(_) => {
+                    | ServerGeneral::PluginData(_) => {
                         PreparedMsg::new(3, &g, &self.general_stream_params)
                     },
                 }

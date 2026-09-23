@@ -1,0 +1,18 @@
+{
+  "users": {
+    "beta_test_user": "c83226be9eea9c400033195ea7619b01a6f96bba0b16b73d4aa2d0cd4aa07d32"
+  },
+  "username_to_uuid": {
+    "beta_test_user": "9c28e2e4-a8d3-5590-b2f7-e58cd6db56e1"
+  },
+  "uuid_to_username": {
+    "9c28e2e4-a8d3-5590-b2f7-e58cd6db56e1": "beta_test_user"
+  },
+  "tokens": {
+    "9520683903544314356": {
+      "uuid": "9c28e2e4-a8d3-5590-b2f7-e58cd6db56e1",
+      "expires_at_unix_ms": 1789958214787
+    }
+  },
+  "admins": []
+}

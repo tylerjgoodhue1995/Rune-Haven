@@ -1091,8 +1091,8 @@ impl WorldSim {
         // ================================================================
         // MACRO WORLD SHAPE: THREE CONTINENTS
         //
-        // This creates the large-scale ocean/continent layout while
-        // preserving Veloren's existing procedural terrain generation.
+        // This creates three distinct landmasses with ocean separating them,
+        // matching the atlas-style world reference.
         //
         // The existing altitude noise still controls mountains, valleys,
         // hills, etc. This layer only establishes the continental layout.
@@ -1106,86 +1106,142 @@ impl WorldSim {
         for posi in 0..map_size_lg.chunks_len() {
             let pos = uniform_idx_as_vec2(map_size_lg, posi);
 
+            // Normalize the position to 0.0 - 1.0 across the entire world.
             let nx = pos.x as f64 / (world_width - 1.0).max(1.0);
             let ny = pos.y as f64 / (world_height - 1.0).max(1.0);
 
+            // Three irregular landmasses with different proportions,
+            // rotations, and vertical offsets. They are deliberately not
+            // arranged along one horizontal line.
             let continents = [
-                // cx, cy, rx, ry, rotation, shape power, noise offset
-                (0.18, 0.30, 0.23, 0.18, -0.35, 1.70, 1.7),
-                (0.52, 0.66, 0.18, 0.28, 0.15, 2.20, 4.3),
-                (0.82, 0.35, 0.25, 0.17, 0.40, 1.45, 7.1),
+                // A tall, slightly tilted western continent.
+                (0.20, 0.25, 0.15, 0.32, -0.28, 0.0, 0.0),
+                // A broad, lower central continent, kept well away from the
+                // western and eastern shorelines.
+                (0.50, 0.72, 0.18, 0.19, 0.20, 1.7, 2.4),
+                // A tall, offset eastern continent with a stronger tilt.
+                (0.80, 0.25, 0.15, 0.31, 0.58, 3.9, 4.6),
             ];
 
             let mut continentalness = 0.0f64;
 
-            for &(cx, cy, rx, ry, rotation, shape_power, noise_offset) in &continents {
-                let warp_x = gen_ctx.small_nz.get([
-                    nx * 1.8 + noise_offset * 0.23,
-                    ny * 1.8 - noise_offset * 0.17,
-                ]) * 0.035;
-                let warp_y = gen_ctx.small_nz.get([
-                    nx * 1.8 - noise_offset * 0.19,
-                    ny * 1.8 + noise_offset * 0.29,
-                ]) * 0.035;
-                let dx = (nx + warp_x - cx) / rx;
-                let dy = (ny + warp_y - cy) / ry;
-                let cos_rotation = rotation.cos();
-                let sin_rotation = rotation.sin();
-                let rotated_x = dx * cos_rotation - dy * sin_rotation;
-                let rotated_y = dx * sin_rotation + dy * cos_rotation;
-                let distance = (rotated_x.abs().powf(shape_power)
-                    + rotated_y.abs().powf(shape_power))
-                .powf(1.0 / shape_power);
-                let mut shape = 1.0 - distance;
-                let broad_coast_noise = gen_ctx
-                    .small_nz
-                    .get([nx * 3.5 + noise_offset, ny * 3.5 - noise_offset]);
-                let fine_coast_noise = gen_ctx
-                    .small_nz
-                    .get([nx * 8.0 - noise_offset * 0.7, ny * 8.0 + noise_offset * 0.4]);
+            for &(cx, cy, rx, ry, angle, noise_x, noise_y) in &continents {
+                let offset_x = nx - cx;
+                let offset_y = ny - cy;
+                let cos_angle = angle.cos();
+                let sin_angle = angle.sin();
+                let rotated_x = offset_x * cos_angle + offset_y * sin_angle;
+                let rotated_y = -offset_x * sin_angle + offset_y * cos_angle;
+                let dx = rotated_x / rx;
+                let dy = rotated_y / ry;
 
-                shape += broad_coast_noise * 0.15 + fine_coast_noise * 0.06;
+                let distance = (dx * dx + dy * dy).sqrt();
+
+                // Convert distance into a smooth continental mask.
+                let mut shape = 1.0 - distance;
+
+                // Use the existing procedural terrain noise to make
+                // coastlines irregular instead of perfect ellipses. Each
+                // continent samples a different offset so the silhouettes
+                // do not repeat.
+                let coast_noise = gen_ctx
+                    .small_nz
+                    .get([nx * 4.2 + noise_x, ny * 4.2 + noise_y]);
+                let detail_noise = gen_ctx
+                    .small_nz
+                    .get([nx * 9.0 + noise_x * 0.7, ny * 9.0 + noise_y * 0.7]);
+
+                shape += coast_noise * 0.18 + detail_noise * 0.06;
+
                 shape = shape.clamp(0.0, 1.0);
+
                 continentalness = continentalness.max(shape);
             }
 
-            // Add small island groups near the continental shelves without
-            // filling the deep-ocean channels between the main continents.
-            let island_groups = [
-                (0.30, 0.24, 0.035, 0.045, 0.8),
-                (0.69, 0.70, 0.045, 0.030, 2.1),
-                (0.91, 0.68, 0.030, 0.050, 3.7),
+            // Smaller geological formations enrich the ocean without joining
+            // the major landmasses. They intentionally use different scales,
+            // rotations, and noise offsets so they do not read as repeated
+            // circles.
+            let islands = [
+                (0.20, 0.78, 0.025, 0.045, 0.4, 0.3, 2.1),
+                (0.34, 0.30, 0.040, 0.022, -0.7, 1.1, 4.4),
+                (0.42, 0.84, 0.018, 0.032, 1.2, 2.0, 0.8),
+                (0.57, 0.47, 0.030, 0.016, 0.2, 3.3, 1.7),
+                (0.69, 0.84, 0.022, 0.040, -0.3, 4.6, 3.2),
+                (0.76, 0.38, 0.045, 0.020, 0.9, 5.2, 0.5),
+                (0.86, 0.67, 0.020, 0.028, -1.1, 6.1, 2.6),
+                (0.51, 0.08, 0.032, 0.018, 0.6, 7.0, 4.8),
             ];
-            for &(cx, cy, rx, ry, noise_offset) in &island_groups {
-                let dx = (nx - cx) / rx;
-                let dy = (ny - cy) / ry;
-                let distance = (dx * dx + dy * dy).sqrt();
-                let island_noise = gen_ctx
+
+            for &(cx, cy, rx, ry, angle, noise_x, noise_y) in &islands {
+                let offset_x = nx - cx;
+                let offset_y = ny - cy;
+                let cos_angle = angle.cos();
+                let sin_angle = angle.sin();
+                let rotated_x = offset_x * cos_angle + offset_y * sin_angle;
+                let rotated_y = -offset_x * sin_angle + offset_y * cos_angle;
+                let distance = (rotated_x / rx).powi(2) + (rotated_y / ry).powi(2);
+                let coast_noise = gen_ctx
                     .small_nz
-                    .get([nx * 12.0 + noise_offset, ny * 12.0 - noise_offset]);
-                let island_shape = 1.0 - distance + island_noise * 0.12;
-                continentalness = continentalness.max(island_shape.clamp(0.0, 0.72));
+                    .get([nx * 18.0 + noise_x, ny * 18.0 + noise_y]);
+                let island_shape =
+                    (1.0 - distance.sqrt() + coast_noise * 0.12).clamp(0.0, 1.0) * 0.78;
+                continentalness = continentalness.max(island_shape);
             }
 
+            // Keep a continuous ocean rim around the world boundary. This
+            // prevents a continent from being cut off at the map edge and
+            // guarantees that each shoreline has open water beyond it.
+            let edge_distance = nx.min(1.0 - nx).min(ny).min(1.0 - ny);
+            let edge_fade = (edge_distance / 0.08).clamp(0.0, 1.0);
+            let edge_fade = edge_fade * edge_fade * (3.0 - 2.0 * edge_fade);
+            continentalness *= edge_fade;
+
+            // Smooth transition around the coastline.
             let land_factor = if continentalness <= 0.30 {
                 0.0
             } else if continentalness >= 0.52 {
                 1.0
             } else {
                 let t = (continentalness - 0.30) / (0.52 - 0.30);
+
+                // Smoothstep.
                 t * t * (3.0 - 2.0 * t)
             };
 
             let original_height = alt_old[posi].1 as f64;
 
             if land_factor <= 0.01 {
+                // Deep ocean.
+                //
+                // Keeping this below zero guarantees that get_oceans()
+                // recognizes the area as ocean when it connects to the
+                // world boundary.
                 alt_old[posi].1 = (-0.18 - continentalness * 0.10) as f32;
             } else {
+                // Preserve Veloren's original procedural terrain while
+                // lifting the continent above sea level.
+                //
+                // This means mountains/hills/valleys are still generated
+                // by Veloren rather than being replaced by flat land.
                 let continental_height = land_factor * 0.32 - (1.0 - land_factor) * 0.08;
+
                 let blended_height = original_height * 0.72 + continental_height;
+
                 alt_old[posi].1 = blended_height.max(0.015) as f32;
             }
         }
+
+        // ================================================================
+        // END THREE-CONTINENT MACRO WORLD SHAPE
+        // ================================================================
+
+        let macro_land_chunks = alt_old.iter().filter(|(_, height)| *height > 0.0).count();
+        info!(
+            macro_land_chunks,
+            total_chunks = alt_old.len(),
+            "Generated macro geography"
+        );
 
         // Calculate oceans.
         let is_ocean = get_oceans(map_size_lg, |posi: usize| alt_old[posi].1);
@@ -2699,6 +2755,29 @@ impl SimChunk {
                     .max(0.0)
                     .div(1.0 - CONFIG.tropical_temp))
             .max(0.0);
+
+        // Keep the three macro landmasses visually distinct while retaining
+        // the normal biome system and its noise-driven local variation.
+        let normalized = Vec2::new(
+            pos.x as f32 / (map_size_lg.chunks().x.saturating_sub(1) as f32).max(1.0),
+            pos.y as f32 / (map_size_lg.chunks().y.saturating_sub(1) as f32).max(1.0),
+        );
+        let continent_profiles = [
+            (Vec2::new(0.20, 0.25), 0.15, 0.32), // northern snow continent
+            (Vec2::new(0.50, 0.72), 0.55, -0.45), // warm, dry badlands
+            (Vec2::new(0.80, 0.25), 0.05, 0.12), // temperate mixed-biome continent
+        ];
+        let (profile_temp, profile_humidity) = continent_profiles
+            .iter()
+            .map(|(center, temp_bias, humidity_bias)| {
+                let distance = (normalized - *center).magnitude();
+                (distance, *temp_bias, *humidity_bias)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, temp_bias, humidity_bias)| (temp_bias, humidity_bias))
+            .unwrap_or((0.0, 0.0));
+        let temp = (temp + profile_temp).clamp(-1.0, 1.0);
+        let humidity = (humidity + profile_humidity).clamp(0.0, 1.0);
 
         let mut alt = CONFIG.sea_level.add(alt_pre);
         let basement = CONFIG.sea_level.add(basement_pre);
