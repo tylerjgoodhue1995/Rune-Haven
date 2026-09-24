@@ -1,0 +1,35 @@
+(
+    gameserver_protocols: [
+        Tcp(
+            address: "0.0.0.0:14004",
+        ),
+        Tcp(
+            address: "[::]:14004",
+        ),
+    ],
+    auth_server_address: Some("http://52.247.50.106:19253"),
+    query_address: Some("0.0.0.0:14006"),
+    max_players: 100,
+    world_seed: 130626853,
+    server_name: "Runehaven Veloren Server",
+    day_length: 24.0,
+    map_file: None,
+    max_view_distance: Some(65),
+    max_player_group_size: 6,
+    client_timeout: 40,
+    max_player_for_kill_broadcast: None,
+    calendar_mode: Auto,
+    experimental_terrain_persistence: false,
+    gameplay: (
+        battle_mode: Global(PvE),
+        explosion_burn_marks: true,
+    ),
+    moderation: (
+        banned_words_files: [],
+        automod: false,
+        admins_exempt: true,
+    ),
+    world: (
+        world_gen: None,
+    ),
+)
