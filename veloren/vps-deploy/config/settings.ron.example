@@ -19,7 +19,7 @@
     client_timeout: 40,
     max_player_for_kill_broadcast: None,
     calendar_mode: Auto,
-    experimental_terrain_persistence: false,
+    experimental_terrain_persistence: true,
     gameplay: (
         battle_mode: Global(PvE),
         explosion_burn_marks: true,
