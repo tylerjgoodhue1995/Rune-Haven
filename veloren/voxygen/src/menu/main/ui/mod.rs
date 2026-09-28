@@ -265,6 +265,7 @@ enum Message {
     ShowServers,
     ShowCredits,
     #[cfg(feature = "singleplayer")]
+    #[expect(dead_code)]
     Singleplayer,
     #[cfg(feature = "singleplayer")]
     SingleplayerPlay,
@@ -279,10 +280,13 @@ enum Message {
     UnlockServerField,
     LanguageChanged(usize),
     OpenLanguageMenu,
+    #[expect(dead_code)]
     Username(String),
+    #[expect(dead_code)]
     Password(String),
     Server(String),
     ServerChanged(usize),
+    #[expect(dead_code)]
     FocusPassword,
     CancelConnect,
     TrustPromptAdd,

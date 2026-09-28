@@ -12995,7 +12995,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-client"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "async-channel 2.5.0",
  "authc",
@@ -13029,7 +13029,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-client-i18n"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "clap",
  "fluent",
@@ -13046,7 +13046,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "ahash 0.8.12",
  "approx 0.5.1",
@@ -13098,7 +13098,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-assets"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "assets_manager",
  "dot_vox",
@@ -13115,7 +13115,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-base"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "directories-next",
  "profiling",
@@ -13124,7 +13124,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-dynlib"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "find_folder",
  "libloading 0.9.0",
@@ -13134,7 +13134,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-ecs"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "float-cmp",
  "specs",
@@ -13144,7 +13144,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-frontend"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "termcolor",
  "tracing",
@@ -13156,7 +13156,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-i18n"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "hashbrown 0.17.1",
  "rand 0.10.1",
@@ -13165,7 +13165,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-net"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "bincode 2.0.1",
  "flate2",
@@ -13182,7 +13182,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-state"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "async-trait",
  "atomic_refcell",
@@ -13214,7 +13214,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-common-systems"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "itertools 0.14.0",
  "ordered-float 5.3.0",
@@ -13312,7 +13312,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-rtsim"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anymap2",
  "atomic_refcell",
@@ -13338,7 +13338,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-server"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "atomicwrites",
  "authc",
@@ -13394,7 +13394,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-server-agent"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "itertools 0.14.0",
  "lazy_static",
@@ -13411,7 +13411,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-server-cli"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "axum",
  "cansi",
@@ -13444,7 +13444,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-voxygen"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "backtrace",
  "bitflags 2.13.0",
@@ -13524,7 +13524,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-voxygen-anim"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "bytemuck",
  "inline_tweak",
@@ -13537,7 +13537,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-voxygen-egui"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "egui",
  "egui-winit",
@@ -13551,7 +13551,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-voxygen-i18n-helpers"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "rand 0.10.1",
  "tracing",
@@ -13563,7 +13563,7 @@ dependencies = [
 
 [[package]]
 name = "veloren-world"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "arr_macro",
  "bincode 2.0.1",

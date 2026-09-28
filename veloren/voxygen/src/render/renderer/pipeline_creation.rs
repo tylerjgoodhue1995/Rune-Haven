@@ -5,8 +5,8 @@ use crate::render::{
 
 use super::{
     super::{
-        AaMode, BloomMode, CloudMode, ExperimentalShader, FluidMode, LightingMode, PipelineModes,
-        ReflectionMode, RenderError, ShadowMode,
+        AaMode, BloomMode, CloudMode, FluidMode, LightingMode, PipelineModes, ReflectionMode,
+        RenderError, ShadowMode,
         pipelines::{
             blit, bloom, clouds, debug, figure, fluid, lod_object, lod_terrain, particle,
             postprocess, rope, shadow, skybox, sprite, terrain, trail, ui,

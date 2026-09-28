@@ -1,5 +1,4 @@
 use common_base::prof_span;
-use tracing::info;
 
 use crate::render::RenderError;
 
