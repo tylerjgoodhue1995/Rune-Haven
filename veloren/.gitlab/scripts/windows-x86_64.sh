@@ -8,7 +8,7 @@ export VELOREN_USERDATA_STRATEGY=executable;
 # which prevents the windows-specific rustflags set in .cargo/config from being applied.
 export RUSTFLAGS="-D warnings -C link-arg=-lpsapi";
 
-time cargo build --target=x86_64-pc-windows-gnu --release --no-default-features --features "default-publish";
+time cargo build --target=x86_64-pc-windows-gnu --release --no-default-features --features "default-publish" -p veloren-server-cli -p veloren-voxygen;
 
 # Compress debug info sections to reduce binary size
 objcopy --compress-debug-sections=zlib target/x86_64-pc-windows-gnu/release/veloren-server-cli.exe target/x86_64-pc-windows-gnu/release/veloren-server-cli-compressed.exe

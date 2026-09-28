@@ -91,7 +91,7 @@
   script:
     - export MACOSX_DEPLOYMENT_TARGET="10.15";
     - export VELOREN_USERDATA_STRATEGY=executable;
-    - cargo build --profile ${PROFILE} --no-default-features --features default-publish --target ${RUST_TARGET};
+    - cargo build --profile ${PROFILE} --no-default-features --features default-publish --target ${RUST_TARGET} -p veloren-server-cli -p veloren-voxygen;
     - cp -r target/${RUST_TARGET}/${PROFILE}/veloren-server-cli ${CI_PROJECT_DIR};
     - cp -r target/${RUST_TARGET}/${PROFILE}/veloren-voxygen ${CI_PROJECT_DIR};
     - cp -r assets ${CI_PROJECT_DIR}/assets;

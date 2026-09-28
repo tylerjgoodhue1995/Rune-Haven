@@ -1,6 +1,6 @@
 #!/bin/bash
 export VELOREN_USERDATA_STRATEGY=executable;
-time cargo build --release --no-default-features --features default-publish;
+time cargo build --release --no-default-features --features default-publish -p veloren-server-cli -p veloren-voxygen;
 # evaluate --bin instead, last time i checked (2021-07-14) it was 2 minutes slower on release (but faster on debug)
 
 # compress debuginfos via zlib, which reduces the size by 50% while still beeing supported by most tools
