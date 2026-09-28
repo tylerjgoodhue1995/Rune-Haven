@@ -36,7 +36,8 @@ fn initial_civ_count(map_size_lg: MapSizeLg) -> u32 {
     // them here.
     //
     // NOTE: 48 at "default" scale of 10 × 10 chunk bits (1024 × 1024 chunks).
-    let cnt = (3 << (map_size_lg.vec().x + map_size_lg.vec().y)) >> 16;
+    // INCREASED: Changed from 3 to 6 for more civilizations/cities
+    let cnt = (6 << (map_size_lg.vec().x + map_size_lg.vec().y)) >> 16;
     cnt.max(1) // we need at least one civ in order to generate a starting site
 }
 
@@ -283,6 +284,7 @@ impl Civs {
                     center: citadel_center,
                     place,
                     site_tmp: None,
+                    is_capital: false,
                 });
             }
         }
@@ -480,6 +482,7 @@ impl Civs {
                     center: loc,
                     place,
                     site_tmp: None,
+                    is_capital: false,
                 }))
             });
         }
@@ -501,6 +504,7 @@ impl Civs {
                 });
 
             let mut rng = ctx.reseed().rng;
+            let is_capital = sim_site.is_capital;
             let site = index.sites.insert({
                 let index_ref = IndexRef {
                     colors: &index.colors(),
@@ -518,6 +522,7 @@ impl Civs {
                             size,
                             calendar,
                             &mut gen_meta,
+                            is_capital, // Pass capital flag for guaranteed airship dock
                         )
                     },
                     SiteKind::GliderCourse => WorldSite::generate_glider_course(
@@ -532,6 +537,7 @@ impl Civs {
                         &mut rng,
                         wpos,
                         &mut gen_meta,
+                        is_capital, // Pass capital flag for guaranteed airship dock
                     ),
                     SiteKind::SavannahTown => WorldSite::generate_savannah_town(
                         &Land::from_sim(ctx.sim),
@@ -539,6 +545,7 @@ impl Civs {
                         &mut rng,
                         wpos,
                         &mut gen_meta,
+                        is_capital, // Pass capital flag for guaranteed airship dock
                     ),
                     SiteKind::CoastalTown => WorldSite::generate_coastal_town(
                         &Land::from_sim(ctx.sim),
@@ -546,6 +553,7 @@ impl Civs {
                         &mut rng,
                         wpos,
                         &mut gen_meta,
+                        is_capital, // Pass capital flag for guaranteed airship dock
                     ),
                     SiteKind::PirateHideout => {
                         WorldSite::generate_pirate_hideout(&Land::from_sim(ctx.sim), &mut rng, wpos)
@@ -569,6 +577,7 @@ impl Civs {
                         &mut rng,
                         wpos,
                         &mut gen_meta,
+                        is_capital, // Pass capital flag for guaranteed airship dock
                     ),
                     SiteKind::GiantTree => {
                         WorldSite::generate_giant_tree(&Land::from_sim(ctx.sim), &mut rng, wpos)
@@ -643,6 +652,7 @@ impl Civs {
                         &mut rng,
                         wpos,
                         &mut gen_meta,
+                        is_capital, // Pass capital flag for guaranteed airship dock
                     ),
                     SiteKind::Sahagin => WorldSite::generate_sahagin(
                         &Land::from_sim(ctx.sim),
@@ -831,23 +841,32 @@ impl Civs {
             .avoid_all_of(self.town_enemies(), 60)
             .close_to_one_of(std::iter::once(target), 128)
             .finalize(&world_dims);
-        let loc = (0..100)
-            .flat_map(|_| {
-                find_site_loc(ctx, &avoid_town_enemies, &kind).and_then(|loc| {
-                    town_attributes_of_site(loc, ctx.sim)
-                        .map(|town_attrs| (loc, town_attrs.score()))
+        let town_requirements = ProximityRequirementsBuilder::new()
+            .avoid_all_of(self.town_enemies(), 60)
+            .finalize(&world_dims);
+        let mut choose_town_location = |requirements: &ProximityRequirements| {
+            (0..100)
+                .flat_map(|_| {
+                    find_site_loc(ctx, requirements, &kind).and_then(|loc| {
+                        town_attributes_of_site(loc, ctx.sim)
+                            .map(|town_attrs| (loc, town_attrs.score()))
+                    })
                 })
-            })
-            // Compare just a few different potential locations (produces diversity)
-            .take(4)
-            .reduce(|a, b| if a.1 > b.1 { a } else { b })?
-            .0;
+                .take(4)
+                .reduce(|a, b| if a.1 > b.1 { a } else { b })
+                .map(|(loc, _)| loc)
+        };
+        let loc = choose_town_location(&avoid_town_enemies)
+            .or_else(|| choose_town_location(&town_requirements))?;
 
+        // MARKER: CAPITAL CITY - This is one of the 3 continental capitals
+        // that will have guaranteed airship docks for blimp transit
         let site = self.establish_site(ctx, loc, |place| Site {
             kind,
             site_tmp: None,
             center: loc,
             place,
+            is_capital: true, // Flag this as a capital city for guaranteed airship dock
             /* most economic members have moved to site/Economy */
             /* last_exports: Stocks::from_default(0.0),
              * export_targets: Stocks::from_default(0.0),
@@ -1336,6 +1355,7 @@ impl Civs {
                                         site_tmp: None,
                                         center,
                                         place,
+                                        is_capital: false,
                                     }
                                 });
                             self.bridges.insert(locs[1], (locs[2], id));
@@ -1784,6 +1804,9 @@ pub struct Site {
     pub site_tmp: Option<Id<crate::site::Site>>,
     pub center: Vec2<i32>,
     pub place: Id<Place>,
+    // MARKER: CAPITAL FLAG - Marks if this site is a continental capital
+    // Capital cities get guaranteed airship docks for blimp transit
+    pub is_capital: bool,
 }
 
 impl fmt::Display for Site {

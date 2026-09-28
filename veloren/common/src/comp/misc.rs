@@ -50,7 +50,7 @@ impl Component for Object {
     type Storage = FlaggedStorage<Self, VecStorage<Self>>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PortalData {
     pub target: Vec3<f32>,
     pub requires_no_aggro: bool,

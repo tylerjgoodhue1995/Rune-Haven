@@ -39,6 +39,7 @@ use comp::Behavior;
 use core::cmp::Reverse;
 use itertools::Itertools;
 use rayon::{iter::Either, prelude::*};
+use serde::{Deserialize, Serialize};
 use specs::{
     Entities, Entity, Join, LendJoin, ParJoin, Read, ReadExpect, ReadStorage, SystemData, Write,
     WriteExpect, WriteStorage, shred, storage::GenericReadStorage,
@@ -118,6 +119,13 @@ impl<'a> System<'a> for Sys {
         // don't create duplicate work for chunks that just finished but are not
         // yet added to the terrain.
         data.chunk_requests.drain(..).for_each(|request| {
+            #[cfg(feature = "persistent_world")]
+            let persistent_path = data
+                .terrain_persistence
+                .as_ref()
+                .map(|persistence| persistence.path().to_path_buf());
+            #[cfg(not(feature = "persistent_world"))]
+            let persistent_path = None;
             data.chunk_generator.generate_chunk(
                 Some(request.entity),
                 request.key,
@@ -126,6 +134,7 @@ impl<'a> System<'a> for Sys {
                 &data.rtsim,
                 data.index.clone(),
                 (*data.time_of_day, data.calendar.clone()),
+                persistent_path,
             )
         });
 
@@ -135,8 +144,13 @@ impl<'a> System<'a> for Sys {
         let mut new_chunks = Vec::new();
         'insert_terrain_chunks: while let Some((key, res)) = data.chunk_generator.recv_new_chunk() {
             #[cfg_attr(not(feature = "persistent_world"), expect(unused_mut))]
-            let (mut chunk, supplement) = match res {
-                Ok((chunk, supplement)) => (chunk, supplement),
+            let (mut chunk, mut supplement, saved_supplement, cached_npcs) = match res {
+                Ok(generated) => (
+                    generated.terrain,
+                    generated.supplement,
+                    generated.saved_supplement,
+                    generated.cached_npcs,
+                ),
                 Err(Some(entity)) => {
                     if let Some(client) = data.clients.get(entity) {
                         client.send_fallible(ServerGeneral::TerrainChunkUpdate {
@@ -150,11 +164,17 @@ impl<'a> System<'a> for Sys {
                     continue 'insert_terrain_chunks;
                 },
             };
+            #[cfg(not(feature = "persistent_world"))]
+            let _ = cached_npcs;
 
             // Apply changes from terrain persistence to this chunk
             #[cfg(feature = "persistent_world")]
             if let Some(terrain_persistence) = data.terrain_persistence.as_mut() {
-                terrain_persistence.apply_changes(key, &mut chunk);
+                if saved_supplement.is_some() {
+                    terrain_persistence.apply_persisted_edits(key, &mut chunk);
+                } else {
+                    terrain_persistence.apply_changes(key, &mut chunk);
+                }
             }
 
             // Arcify the chunk
@@ -174,65 +194,117 @@ impl<'a> System<'a> for Sys {
                     .hook_load_chunk(key, supplement.rtsim_max_resources, &data.world);
             }
 
-            // Handle chunk supplement
-            for entity_spawn in supplement.entity_spawns {
-                // Check this because it's a common source of weird bugs
-                let check_pos = |pos: Vec3<f32>| {
-                    assert!(
-                        data.terrain
-                            .pos_key(pos.map(|e| e.floor() as i32))
-                            .map2(key, |e, tgt| (e - tgt).abs() <= 1)
-                            .reduce_and(),
-                        "Chunk spawned entity that wasn't nearby",
-                    )
-                };
+            let check_pos = |pos: Vec3<f32>| {
+                assert!(
+                    data.terrain
+                        .pos_key(pos.map(|e| e.floor() as i32))
+                        .map2(key, |e, tgt| (e - tgt).abs() <= 1)
+                        .reduce_and(),
+                    "Chunk spawned entity that wasn't nearby",
+                )
+            };
+            let mut generated_npcs = Vec::new();
+            let mut generated_specials = Vec::new();
 
-                match entity_spawn {
-                    EntitySpawn::Entity(entity) => {
-                        check_pos(entity.pos);
-
-                        let data = SpawnEntityData::from_entity_info(*entity);
-                        match data {
-                            SpawnEntityData::Special(pos, entity) => {
-                                emitters.emit(CreateSpecialEntityEvent { pos, entity });
-                            },
-                            SpawnEntityData::Npc(data) => {
-                                let (npc_builder, pos) = data.to_npc_builder();
-
-                                emitters.emit(CreateNpcEvent {
-                                    pos,
-                                    ori: comp::Ori::from(Dir::random_2d(&mut rng)),
-                                    npc: npc_builder.with_anchor(comp::Anchor::Chunk(key)),
-                                });
-                            },
-                        }
-                    },
-                    EntitySpawn::Group(group) => {
-                        for entity in group.iter() {
+            if let Some(saved_supplement) = &saved_supplement {
+                for special in &saved_supplement.special_entities {
+                    check_pos(special.pos);
+                    emitters.emit(CreateSpecialEntityEvent {
+                        pos: special.pos,
+                        entity: special.entity.clone(),
+                    });
+                }
+            } else {
+                for entity_spawn in supplement.entity_spawns.drain(..) {
+                    match entity_spawn {
+                        EntitySpawn::Entity(entity) => {
                             check_pos(entity.pos);
-                        }
-
-                        let create_npc_events = group
-                            .into_iter()
-                            .filter_map(|entity| match SpawnEntityData::from_entity_info(entity) {
-                                SpawnEntityData::Special(..) => None,
-                                SpawnEntityData::Npc(data) => {
-                                    let (npc_builder, pos) = data.to_npc_builder();
-                                    Some(CreateNpcEvent {
-                                        pos,
-                                        ori: comp::Ori::from(Dir::random_2d(&mut rng)),
-                                        npc: npc_builder.with_anchor(comp::Anchor::Chunk(key)),
-                                    })
+                            match SpawnEntityData::from_entity_info(*entity) {
+                                SpawnEntityData::Special(pos, entity) => {
+                                    generated_specials.push(
+                                        crate::terrain_persistence::SavedSpecialSpawn {
+                                            pos,
+                                            entity: entity.clone(),
+                                        },
+                                    );
+                                    emitters.emit(CreateSpecialEntityEvent { pos, entity });
                                 },
-                            })
-                            .collect::<Vec<_>>();
-
-                        emitters.emit(CreateNpcGroupEvent {
-                            npcs: create_npc_events,
-                        });
-                    },
+                                SpawnEntityData::Npc(data) => generated_npcs.push(data),
+                            }
+                        },
+                        EntitySpawn::Group(group) => {
+                            for entity in group {
+                                check_pos(entity.pos);
+                                if let SpawnEntityData::Npc(data) =
+                                    SpawnEntityData::from_entity_info(entity)
+                                {
+                                    generated_npcs.push(data);
+                                }
+                            }
+                        },
+                    }
                 }
             }
+
+            #[cfg(feature = "persistent_world")]
+            let npcs = if let Some(npcs) = cached_npcs {
+                npcs
+            } else if let Some(terrain_persistence) = data.terrain_persistence.as_mut() {
+                if let Some(npcs) = terrain_persistence.load_npcs(key) {
+                    npcs
+                } else {
+                    terrain_persistence.save_npcs(key, &generated_npcs);
+                    generated_npcs
+                }
+            } else {
+                generated_npcs
+            };
+            #[cfg(not(feature = "persistent_world"))]
+            let npcs = generated_npcs;
+
+            #[cfg(feature = "persistent_world")]
+            if saved_supplement.is_none()
+                && let Some(terrain_persistence) = data.terrain_persistence.as_mut()
+            {
+                let rtsim_max_resources = [
+                    common::rtsim::TerrainResource::Grass,
+                    common::rtsim::TerrainResource::Flower,
+                    common::rtsim::TerrainResource::Fruit,
+                    common::rtsim::TerrainResource::Vegetable,
+                    common::rtsim::TerrainResource::Mushroom,
+                    common::rtsim::TerrainResource::Loot,
+                    common::rtsim::TerrainResource::Plant,
+                    common::rtsim::TerrainResource::Stone,
+                    common::rtsim::TerrainResource::Wood,
+                    common::rtsim::TerrainResource::Gem,
+                    common::rtsim::TerrainResource::Ore,
+                ]
+                .into_iter()
+                .map(|resource| (resource, supplement.rtsim_max_resources[resource]))
+                .collect();
+                terrain_persistence.save_supplement(
+                    key,
+                    &crate::terrain_persistence::SavedChunkSupplement {
+                        special_entities: generated_specials,
+                        rtsim_max_resources,
+                    },
+                );
+            }
+
+            let create_npc_events = npcs
+                .into_iter()
+                .map(|data| {
+                    let (npc_builder, pos) = data.to_npc_builder();
+                    CreateNpcEvent {
+                        pos,
+                        ori: comp::Ori::from(Dir::random_2d(&mut rng)),
+                        npc: npc_builder.with_anchor(comp::Anchor::Chunk(key)),
+                    }
+                })
+                .collect::<Vec<_>>();
+            emitters.emit(CreateNpcGroupEvent {
+                npcs: create_npc_events,
+            });
         }
 
         // TODO: Consider putting this in another system since this forces us to take
@@ -411,7 +483,7 @@ impl<'a> System<'a> for Sys {
 }
 
 // TODO: better name
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NpcData {
     pub pos: Pos,
     pub stats: comp::Stats,
@@ -419,13 +491,16 @@ pub struct NpcData {
     pub health: Option<comp::Health>,
     pub poise: comp::Poise,
     pub inventory: comp::inventory::Inventory,
+    #[serde(skip)]
     pub agent: Option<comp::Agent>,
     pub body: comp::Body,
     pub alignment: comp::Alignment,
     pub scale: comp::Scale,
     pub loot: LootSpec<String>,
     pub pets: Vec<(NpcData, Vec3<f32>)>,
+    #[serde(skip)]
     pub death_effects: Option<DeathEffects>,
+    #[serde(skip)]
     pub rider_effects: Option<RiderEffects>,
     pub rider: Option<Box<NpcData>>,
 }
@@ -640,7 +715,7 @@ impl NpcData {
                 .with_health(health)
                 .with_poise(poise)
                 .with_inventory(inventory)
-                .with_agent(agent)
+                .with_agent(agent.or_else(|| Some(comp::Agent::from_body(&body))))
                 .with_scale(scale)
                 .with_loot(loot)
                 .with_pets(

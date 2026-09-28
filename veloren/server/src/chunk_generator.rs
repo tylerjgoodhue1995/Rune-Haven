@@ -1,8 +1,11 @@
-use crate::metrics::ChunkGenMetrics;
 #[cfg(feature = "worldgen")]
 use crate::rtsim::RtSim;
 #[cfg(not(feature = "worldgen"))]
 use crate::test_world::{IndexOwned, World};
+use crate::{
+    metrics::ChunkGenMetrics,
+    terrain_persistence::{SavedChunkSupplement, TerrainPersistence},
+};
 use common::{
     calendar::Calendar, generation::ChunkSupplement, resources::TimeOfDay, slowjob::SlowJobPool,
     terrain::TerrainChunk,
@@ -10,18 +13,25 @@ use common::{
 use hashbrown::{HashMap, hash_map::Entry};
 use rayon::iter::ParallelIterator;
 use specs::Entity as EcsEntity;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use vek::*;
 #[cfg(feature = "worldgen")]
 use world::{IndexOwned, World};
 
-type ChunkGenResult = (
-    Vec2<i32>,
-    Result<(TerrainChunk, ChunkSupplement), Option<EcsEntity>>,
-);
+pub struct GeneratedChunk {
+    pub terrain: TerrainChunk,
+    pub supplement: ChunkSupplement,
+    pub saved_supplement: Option<SavedChunkSupplement>,
+    pub cached_npcs: Option<Vec<crate::sys::terrain::NpcData>>,
+}
+
+type ChunkGenResult = (Vec2<i32>, Result<GeneratedChunk, Option<EcsEntity>>);
 
 pub struct ChunkGenerator {
     chunk_tx: crossbeam_channel::Sender<ChunkGenResult>,
@@ -50,6 +60,7 @@ impl ChunkGenerator {
         #[cfg(not(feature = "worldgen"))] _rtsim: &(),
         index: IndexOwned,
         time: (TimeOfDay, Calendar),
+        persistent_path: Option<PathBuf>,
     ) {
         let v = if let Entry::Vacant(v) = self.pending_chunks.entry(key) {
             v
@@ -68,9 +79,32 @@ impl ChunkGenerator {
         let rtsim_resources = None;
 
         slowjob_pool.spawn("CHUNK_GENERATOR", move || {
+            if let Some((terrain, saved_supplement, cached_npcs)) = persistent_path
+                .as_deref()
+                .and_then(|path| TerrainPersistence::load_cached_chunk(path, key))
+            {
+                let mut supplement = ChunkSupplement::default();
+                for &(resource, count) in &saved_supplement.rtsim_max_resources {
+                    supplement.rtsim_max_resources[resource] = count;
+                }
+                let _ = chunk_tx.send((key, Ok(GeneratedChunk {
+                    terrain,
+                    supplement,
+                    saved_supplement: Some(saved_supplement),
+                    cached_npcs: Some(cached_npcs),
+                })));
+                return;
+            }
+
             let index = index.as_index_ref();
             let payload = world
                 .generate_chunk(index, key, rtsim_resources, || cancel.load(Ordering::Relaxed), Some(time))
+                .map(|(terrain, supplement)| GeneratedChunk {
+                    terrain,
+                    supplement,
+                    saved_supplement: None,
+                    cached_npcs: None,
+                })
                 // FIXME: Since only the first entity who cancels a chunk is notified, we end up
                 // delaying chunk re-requests for up to 3 seconds for other clients, which isn't
                 // great.  We *could* store all the other requesting clients here, but it could

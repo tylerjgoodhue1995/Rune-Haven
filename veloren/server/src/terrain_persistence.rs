@@ -1,3 +1,4 @@
+use crate::sys::terrain::NpcData;
 use atomicwrites::{AtomicFile, OverwriteBehavior};
 use bincode::{
     config::legacy,
@@ -5,6 +6,8 @@ use bincode::{
     serde::{decode_from_std_read, encode_to_vec},
 };
 use common::{
+    generation::SpecialEntity,
+    rtsim::TerrainResource,
     terrain::{Block, TerrainChunk},
     vol::{RectRasterableVol, WriteVol},
 };
@@ -13,12 +16,24 @@ use schnellru::{Limiter, LruMap};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     any::{Any, type_name},
-    fs::File,
+    fs::{self, File},
     io::{self, Read as _, Write as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use tracing::{debug, error, info, warn};
 use vek::*;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SavedSpecialSpawn {
+    pub pos: Vec3<f32>,
+    pub entity: SpecialEntity,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SavedChunkSupplement {
+    pub special_entities: Vec<SavedSpecialSpawn>,
+    pub rtsim_max_resources: Vec<(TerrainResource, usize)>,
+}
 
 const MAX_BLOCK_CACHE: usize = 64_000_000;
 
@@ -62,6 +77,16 @@ impl TerrainPersistence {
 
     /// Apply persistence changes to a newly generated chunk.
     pub fn apply_changes(&mut self, key: Vec2<i32>, terrain_chunk: &mut TerrainChunk) {
+        if let Some(generated_chunk) = self.load_generated_chunk(key) {
+            *terrain_chunk = generated_chunk;
+        } else {
+            self.save_generated_chunk(key, terrain_chunk);
+        }
+
+        self.apply_persisted_edits(key, terrain_chunk);
+    }
+
+    pub fn apply_persisted_edits(&mut self, key: Vec2<i32>, terrain_chunk: &mut TerrainChunk) {
         let loaded_chunk = self.load_chunk(key);
 
         let mut resets = Vec::new();
@@ -89,16 +114,180 @@ impl TerrainPersistence {
     /// Maintain terrain persistence (writing changes changes back to
     /// filesystem, etc.)
     pub fn maintain(&mut self) {
-        // Currently, this does nothing because filesystem writeback occurs on
-        // chunk unload However, this is not a particularly reliable
-        // mechanism (it doesn't survive power loss, say). Later, a more
-        // reliable strategy should be implemented here.
+        let modified_chunks = self
+            .chunks
+            .iter()
+            .filter_map(|(key, chunk)| chunk.modified.then_some((*key, chunk.chunk.clone())))
+            .collect::<Vec<_>>();
+
+        for (key, chunk) in modified_chunks {
+            if self.persist_chunk(key, &chunk)
+                && let Some(loaded_chunk) = self.chunks.get_mut(&key)
+            {
+                loaded_chunk.modified = false;
+            }
+        }
     }
 
     fn path_for(&self, key: Vec2<i32>) -> PathBuf {
         let mut path = self.path.clone();
         path.push(format!("chunk_{}_{}.dat", key.x, key.y));
         path
+    }
+
+    fn generated_path_for(&self, key: Vec2<i32>) -> PathBuf {
+        Self::generated_path_for_dir(&self.path, key)
+    }
+
+    fn generated_path_for_dir(dir: &Path, key: Vec2<i32>) -> PathBuf {
+        dir.join(format!("chunk_{}_{}.terrain", key.x, key.y))
+    }
+
+    fn supplement_path_for_dir(dir: &Path, key: Vec2<i32>) -> PathBuf {
+        dir.join(format!("chunk_{}_{}.supplement", key.x, key.y))
+    }
+
+    pub fn path(&self) -> &Path { &self.path }
+
+    pub fn load_cached_chunk(
+        dir: &Path,
+        key: Vec2<i32>,
+    ) -> Option<(TerrainChunk, SavedChunkSupplement, Vec<NpcData>)> {
+        let terrain_bytes = fs::read(Self::generated_path_for_dir(dir, key)).ok()?;
+        let chunk = decode_from_std_read(&mut io::Cursor::new(terrain_bytes), legacy()).ok()?;
+        let supplement_bytes = fs::read(Self::supplement_path_for_dir(dir, key)).ok()?;
+        let supplement =
+            decode_from_std_read(&mut io::Cursor::new(supplement_bytes), legacy()).ok()?;
+        let npcs_path = dir.join(format!("chunk_{}_{}.npcs", key.x, key.y));
+        let npcs_bytes = fs::read(npcs_path).ok()?;
+        let npcs = decode_from_std_read(&mut io::Cursor::new(npcs_bytes), legacy()).ok()?;
+        Some((chunk, supplement, npcs))
+    }
+
+    pub fn save_supplement(&self, key: Vec2<i32>, supplement: &SavedChunkSupplement) {
+        let bytes = match encode_to_vec(supplement, legacy()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                error!(
+                    ?error,
+                    ?key,
+                    "Failed to serialize generated chunk supplement"
+                );
+                return;
+            },
+        };
+        let atomic_file = AtomicFile::new(
+            Self::supplement_path_for_dir(&self.path, key),
+            OverwriteBehavior::AllowOverwrite,
+        );
+        if let Err(error) = atomic_file.write(|file| file.write_all(&bytes)) {
+            error!(?error, ?key, "Failed to persist generated chunk supplement");
+        }
+    }
+
+    fn npcs_path_for(&self, key: Vec2<i32>) -> PathBuf {
+        let mut path = self.path.clone();
+        path.push(format!("chunk_{}_{}.npcs", key.x, key.y));
+        path
+    }
+
+    pub fn load_npcs(&self, key: Vec2<i32>) -> Option<Vec<NpcData>> {
+        let bytes = fs::read(self.npcs_path_for(key)).ok()?;
+        decode_from_std_read(&mut io::Cursor::new(bytes), legacy()).ok()
+    }
+
+    pub fn save_npcs(&self, key: Vec2<i32>, npcs: &[NpcData]) {
+        let mut npcs = npcs.to_vec();
+        if let Some(previous_npcs) = self.load_npcs(key) {
+            for npc in &mut npcs {
+                if let Some(previous) = previous_npcs.iter().min_by_key(|previous| {
+                    (previous.pos.0.distance_squared(npc.pos.0) * 1000.0).max(0.0) as u32
+                }) {
+                    npc.loot = previous.loot.clone();
+                    npc.pets = previous.pets.clone();
+                }
+            }
+        }
+
+        let bytes = match encode_to_vec(&npcs, legacy()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                error!(?error, ?key, "Failed to serialize persistent NPCs");
+                return;
+            },
+        };
+        let atomic_file =
+            AtomicFile::new(self.npcs_path_for(key), OverwriteBehavior::AllowOverwrite);
+        if let Err(error) = atomic_file.write(|file| file.write_all(&bytes)) {
+            error!(?error, ?key, "Failed to persist NPCs");
+        }
+    }
+
+    pub fn remove_npc_near(&self, key: Vec2<i32>, pos: Vec3<f32>) {
+        let Some(mut npcs) = self.load_npcs(key) else {
+            return;
+        };
+        let Some(index) = npcs
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, npc)| (npc.pos.0.distance_squared(pos) * 1000.0).max(0.0) as u32)
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        npcs.remove(index);
+        self.save_npcs(key, &npcs);
+    }
+
+    fn load_generated_chunk(&self, key: Vec2<i32>) -> Option<TerrainChunk> {
+        let path = self.generated_path_for(key);
+        let bytes = fs::read(&path).ok()?;
+        decode_from_std_read(&mut io::Cursor::new(bytes), legacy())
+            .map_err(|error| {
+                warn!(?error, ?path, "Failed to load generated terrain chunk");
+            })
+            .ok()
+    }
+
+    fn save_generated_chunk(&self, key: Vec2<i32>, chunk: &TerrainChunk) {
+        let bytes = match encode_to_vec(chunk, legacy()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                error!(?error, ?key, "Failed to serialize generated terrain chunk");
+                return;
+            },
+        };
+        let atomic_file = AtomicFile::new(
+            self.generated_path_for(key),
+            OverwriteBehavior::AllowOverwrite,
+        );
+        if let Err(error) = atomic_file.write(|file| file.write_all(&bytes)) {
+            error!(?error, ?key, "Failed to persist generated terrain chunk");
+        }
+    }
+
+    fn persist_chunk(&self, key: Vec2<i32>, chunk: &Chunk) -> bool {
+        if chunk.blocks.is_empty() {
+            let path = self.path_for(key);
+            return !path.is_file() || std::fs::remove_file(path).is_ok();
+        }
+
+        let bytes =
+            match encode_to_vec::<version::Current, _>(chunk.clone().prepare_raw(), legacy()) {
+                Err(error) => {
+                    error!(?error, ?key, "Failed to serialize chunk data");
+                    return false;
+                },
+                Ok(bytes) => bytes,
+            };
+        let atomic_file = AtomicFile::new(self.path_for(key), OverwriteBehavior::AllowOverwrite);
+        match atomic_file.write(|file| file.write_all(&bytes)) {
+            Ok(()) => true,
+            Err(error) => {
+                error!(?error, ?key, "Failed to write chunk data");
+                false
+            },
+        }
     }
 
     fn load_chunk(&mut self, key: Vec2<i32>) -> &mut LoadedChunk {
@@ -171,30 +360,7 @@ impl TerrainPersistence {
                 return;
             }
 
-            if chunk.blocks.is_empty() {
-                let path = self.path_for(key);
-
-                if path.is_file()
-                    && let Err(error) = std::fs::remove_file(&path)
-                {
-                    error!(?error, ?path, "Failed to remove file for empty chunk");
-                }
-            } else {
-                let bytes =
-                    match encode_to_vec::<version::Current, _>(chunk.prepare_raw(), legacy()) {
-                        Err(err) => {
-                            error!("Failed to serialize chunk data: {:?}", err);
-                            return;
-                        },
-                        Ok(bytes) => bytes,
-                    };
-
-                let atomic_file =
-                    AtomicFile::new(self.path_for(key), OverwriteBehavior::AllowOverwrite);
-                if let Err(err) = atomic_file.write(|file| file.write_all(&bytes)) {
-                    error!("Failed to write chunk data to file: {:?}", err);
-                }
-            }
+            self.persist_chunk(key, &chunk);
         }
     }
 
@@ -321,6 +487,77 @@ impl ByBlockLimiter {
             block_limit,
             counted_blocks: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::vol::ReadVol;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn isolated_persistence(path: PathBuf) -> TerrainPersistence {
+        fs::create_dir_all(&path).unwrap();
+        TerrainPersistence {
+            path,
+            chunks: HashMap::default(),
+            cached_chunks: LruMap::new(ByBlockLimiter::new(MAX_BLOCK_CACHE)),
+        }
+    }
+
+    #[test]
+    fn generated_chunks_are_restored_before_edits() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("veloren-terrain-test-{suffix}"));
+        let key = Vec2::new(3, -7);
+
+        let mut persistence = isolated_persistence(path.clone());
+        let mut original = TerrainChunk::water(0);
+        persistence.apply_changes(key, &mut original);
+        assert!(TerrainPersistence::load_cached_chunk(&path, key).is_none());
+        persistence.save_supplement(key, &SavedChunkSupplement {
+            special_entities: vec![SavedSpecialSpawn {
+                pos: Vec3::zero(),
+                entity: SpecialEntity::Waypoint,
+            }],
+            rtsim_max_resources: vec![(TerrainResource::Stone, 2)],
+        });
+        assert!(TerrainPersistence::load_cached_chunk(&path, key).is_none());
+        persistence.save_npcs(key, &[]);
+        drop(persistence);
+
+        let (cached, cached_supplement, cached_npcs) =
+            TerrainPersistence::load_cached_chunk(&path, key).unwrap();
+        assert_eq!(cached.get_min_z(), original.get_min_z());
+        assert!(cached_npcs.is_empty());
+        assert_eq!(cached_supplement.rtsim_max_resources, vec![(
+            TerrainResource::Stone,
+            2
+        )]);
+        assert!(matches!(
+            cached_supplement.special_entities[0].entity,
+            SpecialEntity::Waypoint
+        ));
+
+        let mut restored = TerrainChunk::water(100);
+        let mut persistence = isolated_persistence(path.clone());
+        persistence.apply_changes(key, &mut restored);
+
+        assert_eq!(restored.get_min_z(), original.get_min_z());
+        assert_eq!(
+            restored.get(Vec3::zero()).unwrap(),
+            original.get(Vec3::zero()).unwrap()
+        );
+        assert!(path.join("chunk_3_-7.terrain").is_file());
+
+        drop(persistence);
+        fs::remove_dir_all(path).unwrap();
     }
 }
 

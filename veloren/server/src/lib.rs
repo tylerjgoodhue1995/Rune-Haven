@@ -30,7 +30,6 @@ pub mod rtsim;
 pub mod settings;
 pub mod state_ext;
 pub mod sys;
-#[cfg(feature = "persistent_world")]
 pub mod terrain_persistence;
 #[cfg(not(feature = "worldgen"))] mod test_world;
 pub mod vgld;
@@ -1036,6 +1035,150 @@ impl Server {
                 .collect::<Vec<_>>()
         };
 
+        #[cfg(feature = "persistent_world")]
+        {
+            let npc_snapshots = {
+                let ecs = self.state.ecs();
+                let positions = ecs.read_storage::<comp::Pos>();
+                let stats = ecs.read_storage::<comp::Stats>();
+                let skill_sets = ecs.read_storage::<comp::SkillSet>();
+                let inventories = ecs.read_storage::<comp::Inventory>();
+                let health = ecs.read_storage::<comp::Health>();
+                let poise = ecs.read_storage::<comp::Poise>();
+                let bodies = ecs.read_storage::<comp::Body>();
+                let alignments = ecs.read_storage::<comp::Alignment>();
+                let scales = ecs.read_storage::<comp::Scale>();
+                let anchors = ecs.read_storage::<Anchor>();
+                let mut snapshots = HashMap::new();
+                for entity in to_delete.iter().copied() {
+                    let Some(Anchor::Chunk(chunk)) = anchors.get(entity) else {
+                        continue;
+                    };
+                    let Some(pos) = positions.get(entity).copied() else {
+                        continue;
+                    };
+                    let Some(stats) = stats.get(entity).cloned() else {
+                        continue;
+                    };
+                    let Some(skill_set) = skill_sets.get(entity).cloned() else {
+                        continue;
+                    };
+                    let Some(inventory) = inventories.get(entity).cloned() else {
+                        continue;
+                    };
+                    let Some(poise) = poise.get(entity).copied() else {
+                        continue;
+                    };
+                    let Some(body) = bodies.get(entity).copied() else {
+                        continue;
+                    };
+                    let Some(alignment) = alignments.get(entity).copied() else {
+                        continue;
+                    };
+                    if health.get(entity).is_some_and(|health| health.is_dead) {
+                        continue;
+                    }
+                    snapshots.entry(*chunk).or_insert_with(Vec::new).push(
+                        crate::sys::terrain::NpcData {
+                            pos,
+                            stats,
+                            skill_set,
+                            health: health.get(entity).cloned(),
+                            poise,
+                            inventory,
+                            agent: None,
+                            body,
+                            alignment,
+                            scale: scales.get(entity).copied().unwrap_or_default(),
+                            loot: common::lottery::LootSpec::Nothing,
+                            pets: Vec::new(),
+                            death_effects: None,
+                            rider_effects: None,
+                            rider: None,
+                        },
+                    );
+                }
+                snapshots
+            };
+            if let Some(persistence) = self.state.ecs_mut().try_fetch_mut::<TerrainPersistence>() {
+                for (chunk, npcs) in npc_snapshots {
+                    persistence.save_npcs(chunk, &npcs);
+                }
+            }
+        }
+
+        #[cfg(feature = "persistent_world")]
+        if self.state.ecs().read_resource::<Tick>().0 % 300 == 0 {
+            let npc_snapshots = {
+                let ecs = self.state.ecs();
+                let entities = ecs.entities();
+                let positions = ecs.read_storage::<comp::Pos>();
+                let presences = ecs.read_storage::<comp::Presence>();
+                let stats = ecs.read_storage::<comp::Stats>();
+                let skill_sets = ecs.read_storage::<comp::SkillSet>();
+                let inventories = ecs.read_storage::<comp::Inventory>();
+                let health = ecs.read_storage::<comp::Health>();
+                let poise = ecs.read_storage::<comp::Poise>();
+                let bodies = ecs.read_storage::<comp::Body>();
+                let alignments = ecs.read_storage::<comp::Alignment>();
+                let scales = ecs.read_storage::<comp::Scale>();
+                let anchors = ecs.read_storage::<Anchor>();
+                let mut snapshots = HashMap::new();
+                (
+                    &entities,
+                    &positions,
+                    !&presences,
+                    &stats,
+                    &skill_sets,
+                    &inventories,
+                    (&health).maybe(),
+                    &poise,
+                    &bodies,
+                    &alignments,
+                    (&scales).maybe(),
+                    &anchors,
+                )
+                    .join()
+                    .filter_map(
+                        |(_, pos, _, stats, skill_set, inventory, health, poise, body, alignment, scale, anchor)| {
+                            if health.is_some_and(|health| health.is_dead) {
+                                return None;
+                            }
+                            let Anchor::Chunk(chunk) = anchor else {
+                                return None;
+                            };
+                            let npc = crate::sys::terrain::NpcData {
+                                pos: *pos,
+                                stats: stats.clone(),
+                                skill_set: skill_set.clone(),
+                                health: health.cloned(),
+                                poise: *poise,
+                                inventory: inventory.clone(),
+                                agent: None,
+                                body: *body,
+                                alignment: *alignment,
+                                scale: scale.copied().unwrap_or_default(),
+                                loot: common::lottery::LootSpec::Nothing,
+                                pets: Vec::new(),
+                                death_effects: None,
+                                rider_effects: None,
+                                rider: None,
+                            };
+                            Some((*chunk, npc))
+                        },
+                    )
+                    .for_each(|(chunk, npc)| {
+                        snapshots.entry(chunk).or_insert_with(Vec::new).push(npc);
+                    });
+                snapshots
+            };
+            if let Some(persistence) = self.state.ecs_mut().try_fetch_mut::<TerrainPersistence>() {
+                for (chunk, npcs) in npc_snapshots {
+                    persistence.save_npcs(chunk, &npcs);
+                }
+            }
+        }
+
         #[cfg(feature = "worldgen")]
         {
             let mut rtsim = self.state.ecs().write_resource::<rtsim::RtSim>();
@@ -1198,6 +1341,12 @@ impl Server {
             let slow_jobs = ecs.write_resource::<SlowJobPool>();
 
             index.reload_if_changed(|index| {
+                #[cfg(feature = "persistent_world")]
+                let persistent_path = ecs
+                    .try_fetch::<TerrainPersistence>()
+                    .map(|persistence| persistence.path().to_path_buf());
+                #[cfg(not(feature = "persistent_world"))]
+                let persistent_path = None;
                 let mut chunk_generator = ecs.write_resource::<ChunkGenerator>();
                 let client = ecs.read_storage::<Client>();
                 let mut terrain = ecs.write_resource::<common::terrain::TerrainGrid>();
@@ -1226,6 +1375,7 @@ impl Server {
                                 *ecs.read_resource::<TimeOfDay>(),
                                 (*ecs.read_resource::<Calendar>()).clone(),
                             ),
+                            persistent_path.clone(),
                         );
                     });
                 }

@@ -1121,6 +1121,16 @@ impl Airships {
             .collect::<Vec<_>>();
         debug_airships!(4, "all_dock_points: {:?}", all_dock_points);
 
+        // MARKER: CAPITAL BLIMP TRANSIT - Prioritize the 3 capital city docks
+        // The first 3 docks in the list should be the capital city docks (since capitals
+        // are generated first), ensuring they form the core triangular transit network
+        let capital_dock_count = all_dock_points.len().min(3);
+        debug_airships!(4, "Capital dock count: {}", capital_dock_count);
+
+        if all_dock_points.len() < 3 {
+            return;
+        }
+
         // Run the delaunay triangulation on the docking points.
         let triangulation = triangulate(&all_dock_points);
 
@@ -1185,6 +1195,15 @@ impl Airships {
             .clamp(1.0, 60.0)
             .round() as usize;
 
+        // MARKER: CAPITAL BLIMP TRANSIT - Increase iterations for capital connectivity
+        // Ensure the 3 capital docks get well-connected by increasing max iterations
+        // when we have enough docks to support a good network
+        let max_iterations = if capital_dock_count >= 3 {
+            max_iterations.max(20) // Ensure at least 20 iterations for capital connectivity
+        } else {
+            max_iterations
+        };
+
         if let Some((best_segments, _, _max_seg_len, _min_spread, _iteration)) = triangulation
             .eulerized_route_segments(
                 &all_dock_points,
@@ -1237,8 +1256,23 @@ impl Airships {
                 }
             }
 
+            let mut route_segments = best_segments;
+            if capital_dock_count >= 3 {
+                // Keep every route loop connected to all three capital docks so every
+                // settlement can reach each capital without changing the route model.
+                for segment in &mut route_segments {
+                    let closing_node = segment.pop().expect("route segments are closed");
+                    for capital_node in (0..3).rev() {
+                        if !segment.contains(&capital_node) {
+                            segment.push(capital_node);
+                        }
+                    }
+                    segment.push(closing_node);
+                }
+            }
+
             self.routes = self.create_route_legs(
-                &best_segments,
+                &route_segments,
                 all_dock_points
                     .iter()
                     .map(|p| Vec2::new(p.x as f32, p.y as f32))
@@ -1246,6 +1280,21 @@ impl Airships {
                     .as_slice(),
                 map_size_lg,
             );
+
+            // MARKER: CAPITAL BLIMP TRANSIT - Verify capital connectivity
+            #[cfg(debug_assertions)]
+            {
+                if capital_dock_count >= 3 {
+                    debug_airships!(4, "Checking capital connectivity in {} routes", self.routes.len());
+                    // Log the routes to verify the 3 capitals are connected
+                    for (route_idx, route) in self.routes.iter().enumerate() {
+                        let capital_docks_in_route = route.legs.iter()
+                            .filter(|leg| leg.dest_index < capital_dock_count)
+                            .count();
+                        debug_airships!(4, "Route {} has {} capital docks", route_idx, capital_docks_in_route);
+                    }
+                }
+            }
 
             // Calculate the spawning locations for airships on the routes.
             self.calculate_spawning_locations();
@@ -1288,6 +1337,9 @@ impl Airships {
     pub fn generate_airship_routes(&mut self, world_sim: &mut WorldSim, index: &Index) {
         self.airship_docks = Airships::all_airshipdock_positions(&index.sites);
 
+        // MARKER: CAPITAL BLIMP TRANSIT - Ensure 3 continental capitals are connected
+        // The capital cities have guaranteed airship docks and should form a triangular
+        // transit network for intercontinental travel
         self.generate_airship_routes_inner(
             &world_sim.map_size_lg(),
             index.seed,

@@ -562,6 +562,12 @@ impl StateExt for State {
         {
             let ecs = self.ecs();
             let slow_jobs = ecs.write_resource::<SlowJobPool>();
+            #[cfg(feature = "persistent_world")]
+            let persistent_path = ecs
+                .try_fetch::<crate::TerrainPersistence>()
+                .map(|persistence| persistence.path().to_path_buf());
+            #[cfg(not(feature = "persistent_world"))]
+            let persistent_path = None;
             let rtsim = ecs.read_resource::<RtSim>();
             let mut chunk_generator =
                 ecs.write_resource::<crate::chunk_generator::ChunkGenerator>();
@@ -582,7 +588,7 @@ impl StateExt for State {
             .for_each(|chunk_key| {
                 {
                     let time = (*ecs.read_resource::<TimeOfDay>(), (*ecs.read_resource::<Calendar>()).clone());
-                    chunk_generator.generate_chunk(None, chunk_key, &slow_jobs, Arc::clone(world), &rtsim, index.clone(), time);
+                    chunk_generator.generate_chunk(None, chunk_key, &slow_jobs, Arc::clone(world), &rtsim, index.clone(), time, persistent_path.clone());
                 }
             });
         }

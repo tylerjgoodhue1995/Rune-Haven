@@ -19,7 +19,7 @@ use crate::{
 use common_base::dev_panic;
 use common_i18n::Content;
 use enum_map::EnumMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::error;
 use vek::*;
 
@@ -198,7 +198,7 @@ pub enum EntitySpawn {
     Group(Vec<EntityInfo>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SpecialEntity {
     Waypoint,
     Teleporter(PortalData),

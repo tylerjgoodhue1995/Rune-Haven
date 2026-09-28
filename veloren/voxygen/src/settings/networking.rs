@@ -21,12 +21,17 @@ impl Default for NetworkingSettings {
     fn default() -> Self {
         Self {
             username: "".to_string(),
-            servers: vec!["server.veloren.net".to_string()],
-            default_server: "server.veloren.net".to_string(),
-            trusted_auth_servers: ["https://auth.veloren.net", "http://127.0.0.1:19253"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            servers: vec!["52.247.50.106:14004".to_string()],
+            default_server: "52.247.50.106:14004".to_string(),
+            trusted_auth_servers: [
+                "https://auth.veloren.net",
+                "http://localhost:19253",
+                "http://127.0.0.1:19253",
+                "http://52.247.50.106:19253",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             use_srv: true,
             use_quic: false,
             validate_tls: true,
