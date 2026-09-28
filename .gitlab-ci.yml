@@ -1,0 +1,2 @@
+include:
+  - local: "veloren/.gitlab-ci.yml"

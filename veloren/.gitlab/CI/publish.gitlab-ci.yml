@@ -10,17 +10,17 @@ docker:
   dependencies:
     - linux-x86_64
   before_script:
-    - ls "${CI_PROJECT_DIR}/server-cli/";
+    - ls "${CI_PROJECT_DIR}/veloren/server-cli/";
   script:
     # Help kaniko identify that it is running in a container.
     # Avoids this issue: https://github.com/GoogleContainerTools/kaniko/issues/1542
     - export container=docker;
     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json;
     - |
-      source "${CI_PROJECT_DIR}/.gitlab/scripts/util.sh";
+      source "${CI_PROJECT_DIR}/veloren/.gitlab/scripts/util.sh";
       publishdockertag;
       if [ "${PUBLISH_DOCKER_TAG}"  != "" ]; then
-        /kaniko/executor --context ${CI_PROJECT_DIR} --dockerfile ${CI_PROJECT_DIR}/server-cli/Dockerfile --destination "${CI_REGISTRY_IMAGE}/server-cli:${PUBLISH_DOCKER_TAG}";
+        /kaniko/executor --context ${CI_PROJECT_DIR} --dockerfile ${CI_PROJECT_DIR}/veloren/server-cli/Dockerfile --destination "${CI_REGISTRY_IMAGE}/server-cli:${PUBLISH_DOCKER_TAG}";
       fi
 
 gittag:
@@ -62,7 +62,7 @@ pages:
     - rm -rf public;
     - mkdir -p public;
     - RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo doc --no-deps --document-private-items;
-    - mv target/doc/* public;
+    - mv target/doc/* "${CI_PROJECT_DIR}/public";
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "schedule"
 

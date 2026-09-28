@@ -23,6 +23,7 @@ default:
   # NOTE: The `.build-macos-x86_64` and `.build-macos-aarch64` job templates
   # override this keyword so relevant changes need to be mirrored there.
   before_script:
+    - cd "${CI_PROJECT_DIR}/veloren";
     - source ${HOME}/.cargo/env;
     - df -h /;
     - free -h;
@@ -39,7 +40,7 @@ workflow:
     - if: $CI_COMMIT_REF_NAME =~ /^r[0-9]+\.[0-9]+/ && $GITLAB_USER_ID != "8866215"
 
 include:
-  - local: .gitlab/CI/templates.yml
-  - local: .gitlab/CI/check.gitlab-ci.yml
-  - local: .gitlab/CI/build.gitlab-ci.yml
-  - local: .gitlab/CI/publish.gitlab-ci.yml
+  - local: veloren/.gitlab/CI/templates.yml
+  - local: veloren/.gitlab/CI/check.gitlab-ci.yml
+  - local: veloren/.gitlab/CI/build.gitlab-ci.yml
+  - local: veloren/.gitlab/CI/publish.gitlab-ci.yml

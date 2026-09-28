@@ -4,14 +4,14 @@
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes:
         - "**/*.{glsl,png,rs,ron,ftl,toml,vox,yml,wav,sh}"
-        - "rust-toolchain"
-        - "Cargo.lock"
-        - ".gitlab/CI/*.yml"
-        - ".gitlab/scripts/*.sh"
-        - ".gitlab-ci.yml"
-        - ".cargo/config.toml"
-        - ".rustfmt.toml"
-        - "clippy.toml"
+        - "veloren/rust-toolchain"
+        - "veloren/Cargo.lock"
+        - "veloren/.gitlab/CI/*.yml"
+        - "veloren/.gitlab/scripts/*.sh"
+        - "veloren/.gitlab-ci.yml"
+        - "veloren/.cargo/config.toml"
+        - "veloren/.rustfmt.toml"
+        - "veloren/clippy.toml"
 
 # Template to only run if pushes to master, schedule or a version tag.
 .release:
@@ -42,6 +42,8 @@
     - source ./.gitlab/scripts/windows-x86_64.sh;
     - cp -r target/x86_64-pc-windows-gnu/release/veloren-server-cli.exe ${CI_PROJECT_DIR};
     - cp -r target/x86_64-pc-windows-gnu/release/veloren-voxygen.exe ${CI_PROJECT_DIR};
+    - cp -r assets ${CI_PROJECT_DIR}/assets;
+    - cp LICENSE ${CI_PROJECT_DIR}/LICENSE;
     - cp /usr/lib/gcc/x86_64-w64-mingw32/13-posix/libgcc_s_seh-1.dll ${CI_PROJECT_DIR};
     - cp /usr/lib/gcc/x86_64-w64-mingw32/13-posix/libstdc++-6.dll ${CI_PROJECT_DIR};
     - cp /usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll ${CI_PROJECT_DIR};
@@ -73,6 +75,7 @@
   - cmake --version;
 
 .build-macos-before-script: &build-macos-before-script
+  - cd "${CI_PROJECT_DIR}/veloren";
   - source ${HOME}/.cargo/env;
   - cargo --version;
   - rustup toolchain list;
@@ -91,6 +94,8 @@
     - cargo build --profile ${PROFILE} --no-default-features --features default-publish --target ${RUST_TARGET};
     - cp -r target/${RUST_TARGET}/${PROFILE}/veloren-server-cli ${CI_PROJECT_DIR};
     - cp -r target/${RUST_TARGET}/${PROFILE}/veloren-voxygen ${CI_PROJECT_DIR};
+    - cp -r assets ${CI_PROJECT_DIR}/assets;
+    - cp LICENSE ${CI_PROJECT_DIR}/LICENSE;
   artifacts:
     paths:
       - veloren-server-cli
@@ -140,6 +145,8 @@
     - source ./.gitlab/scripts/linux-x86_64.sh;
     - cp -r target/release/veloren-server-cli ${CI_PROJECT_DIR};
     - cp -r target/release/veloren-voxygen ${CI_PROJECT_DIR};
+    - cp -r assets ${CI_PROJECT_DIR}/assets;
+    - cp LICENSE ${CI_PROJECT_DIR}/LICENSE;
   after_script:
     - echo LINUX_X86_64_JOB_ID=$CI_JOB_ID >> linux_x86_64_job_id.env
   artifacts:
@@ -160,6 +167,8 @@
     - source ./.gitlab/scripts/linux-aarch64.sh;
     - cp -r target/aarch64-unknown-linux-gnu/release/veloren-server-cli ${CI_PROJECT_DIR};
     - cp -r target/aarch64-unknown-linux-gnu/release/veloren-voxygen ${CI_PROJECT_DIR};
+    - cp -r assets ${CI_PROJECT_DIR}/assets;
+    - cp LICENSE ${CI_PROJECT_DIR}/LICENSE;
   after_script:
     - echo LINUX_AARCH64_JOB_ID=$CI_JOB_ID >> linux_aarch64_job_id.env
   artifacts:
