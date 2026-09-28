@@ -103,7 +103,7 @@ opt-windows-x86_64:
   extends:
     - .optional-release
     - .build-windows-x86_64
-  tags: ["veloren/veloren", "build"]
+  tags: ["saas-linux-2xlarge-amd64"]
 
 opt-macos-x86_64:
   extends:
