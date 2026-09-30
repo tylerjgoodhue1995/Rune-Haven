@@ -79,6 +79,10 @@ nix/result*
 ## Rust
 target
 
+# Built release artifacts (regenerate via build-release.bat or CI)
+veloren-release/bin/*.exe
+veloren-release/bin/*.pdb
+
 
 # Shell extensions
 ## direnv
