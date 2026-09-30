@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.18.2] - 2026-09-28
+## [0.18.2] - 2026-09-30
 
 ### Added
 
@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- World generation now creates longer themed continents with gentler broad relief, distinctive climates, mountain spines, and Vhaldris calderas.
+- Town and city plots now follow civic, commercial, residential, and agricultural districts connected by planned plazas and roads.
+- Airship routes now identify the three capital docks by site and include all three capitals on each route loop.
 - Can now swim through lillypads.
 - The default inventory size has been changed from 18 to 36.
 - Music changes when entering a new site.
