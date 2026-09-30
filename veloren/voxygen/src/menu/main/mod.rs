@@ -8,7 +8,7 @@ use crate::{
     Direction, GlobalState, PlayState, PlayStateResult, hud,
     render::{Drawer, GlobalsBindGroup},
     session::SessionState,
-    settings::Settings,
+    settings::{Settings, networking::DEFAULT_SERVER_ADDRESS},
     wallet_bridge::WalletBridge,
     window::Event,
 };
@@ -421,9 +421,8 @@ impl PlayState for MainMenuState {
             // closed the handshake without returning a client error. Replace it
             // so a new wallet signature can always start a fresh login.
             self.init = InitState::None;
-            let net_settings = &global_state.settings.networking;
             let connection_args = ConnectionArgs::Tcp {
-                hostname: net_settings.default_server.clone(),
+                hostname: DEFAULT_SERVER_ADDRESS.to_string(),
                 prefer_ipv6: false,
             };
             attempt_login(
@@ -453,11 +452,8 @@ impl PlayState for MainMenuState {
             .maintain(global_state, global_state.clock.real_dt())
         {
             match event {
-                MainMenuEvent::LoginAttempt {
-                    username,
-                    password,
-                    server_address,
-                } => {
+                MainMenuEvent::LoginAttempt { username, password } => {
+                    let server_address = DEFAULT_SERVER_ADDRESS.to_string();
                     let net_settings = &mut global_state.settings.networking;
                     let use_srv = net_settings.use_srv;
                     let use_quic = net_settings.use_quic;

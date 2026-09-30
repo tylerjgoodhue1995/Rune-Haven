@@ -1,6 +1,8 @@
 use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_SERVER_ADDRESS: &str = "52.247.50.106:14004";
+
 /// `NetworkingSettings` stores server and networking settings.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,8 +23,8 @@ impl Default for NetworkingSettings {
     fn default() -> Self {
         Self {
             username: "".to_string(),
-            servers: vec!["52.247.50.106:14004".to_string()],
-            default_server: "52.247.50.106:14004".to_string(),
+            servers: vec![DEFAULT_SERVER_ADDRESS.to_string()],
+            default_server: DEFAULT_SERVER_ADDRESS.to_string(),
             trusted_auth_servers: [
                 "https://auth.veloren.net",
                 "http://localhost:19253",

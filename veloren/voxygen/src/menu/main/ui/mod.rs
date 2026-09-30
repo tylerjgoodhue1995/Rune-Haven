@@ -22,7 +22,7 @@ use crate::{
 use i18n::{LanguageMetadata, LocalizationHandle};
 use iced::{Column, Container, HorizontalAlignment, Length, Row, Space, text_input};
 //ImageFrame, Tooltip,
-use crate::settings::Settings;
+use crate::settings::{Settings, networking::DEFAULT_SERVER_ADDRESS};
 use common::assets::{AssetExt, Image, Ron};
 use rand::{rng, seq::IndexedRandom};
 use std::time::Duration;
@@ -62,9 +62,6 @@ image_ids_ice! {
         #[cfg(feature = "singleplayer")]
         slider_indicator: "voxygen.element.ui.generic.slider.indicator",
 
-        unlock: "voxygen.element.ui.generic.buttons.unlock",
-        unlock_hover: "voxygen.element.ui.generic.buttons.unlock_hover",
-        unlock_press: "voxygen.element.ui.generic.buttons.unlock_press",
     }
 }
 
@@ -160,7 +157,6 @@ pub enum Event {
     LoginAttempt {
         username: String,
         password: String,
-        server_address: String,
     },
     Web3Login,
     CancelLoginAttempt,
@@ -277,7 +273,6 @@ enum Message {
     WorldConfirmation(world_selector::Confirmation),
     Multiplayer,
     Web3Login,
-    UnlockServerField,
     LanguageChanged(usize),
     OpenLanguageMenu,
     #[expect(dead_code)]
@@ -304,7 +299,7 @@ impl Controls {
         bg_img: widget::image::Handle,
         i18n: LocalizationHandle,
         settings: &Settings,
-        server: Option<String>,
+        _server: Option<String>,
     ) -> Self {
         let version = format!("Veloren {}", *common::util::DISPLAY_VERSION);
 
@@ -322,11 +317,10 @@ impl Controls {
             };
         //};
 
-        let server_field_locked = server.is_some();
         let login_info = LoginInfo {
             username: settings.networking.username.clone(),
             password: String::new(),
-            server: server.unwrap_or_else(|| settings.networking.default_server.clone()),
+            server: DEFAULT_SERVER_ADDRESS.to_string(),
         };
         let selected_server_index = settings
             .networking
@@ -347,7 +341,7 @@ impl Controls {
             version,
             credits,
 
-            server_field_locked,
+            server_field_locked: true,
             selected_server_index,
             login_info,
 
@@ -549,13 +543,11 @@ impl Controls {
                 events.push(Event::LoginAttempt {
                     username: self.login_info.username.trim().to_string(),
                     password: self.login_info.password.clone(),
-                    server_address: self.login_info.server.trim().to_string(),
                 });
             },
             Message::Web3Login => {
                 events.push(Event::Web3Login);
             },
-            Message::UnlockServerField => self.server_field_locked = false,
             Message::Username(new_value) => self.login_info.username = new_value,
             Message::LanguageChanged(new_value) => {
                 events.push(Event::ChangeLanguage(language_metadatas.remove(new_value)));

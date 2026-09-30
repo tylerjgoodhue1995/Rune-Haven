@@ -6,7 +6,7 @@ use crate::ui::{
         component::neat_button,
         style,
         widget::{
-            AspectRatioContainer, BackgroundContainer, Image, Padding,
+            BackgroundContainer, Image, Padding,
             compound_graphic::{CompoundGraphic, Graphic},
         },
     },
@@ -326,8 +326,6 @@ pub struct LoginBanner {
     pub server: text_input::State,
 
     web3_button: button::State,
-
-    unlock_server_field_button: button::State,
 }
 
 impl LoginBanner {
@@ -343,36 +341,11 @@ impl LoginBanner {
         let input_text_size = fonts.cyri.scale(INPUT_TEXT_SIZE);
 
         let server_field: Element<Message> = if server_field_locked {
-            let unlock_style = style::button::Style::new(imgs.unlock)
-                .hover_image(imgs.unlock_hover)
-                .press_image(imgs.unlock_press);
-
-            let unlock_button = Button::new(
-                &mut self.unlock_server_field_button,
-                Space::new(Length::Fill, Length::Fill),
-            )
-            .style(unlock_style)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_press(Message::UnlockServerField);
-
-            let container = AspectRatioContainer::new(unlock_button);
-            let container = match unlock_style.active().0 {
-                Some((img, _)) => container.ratio_of_image(img),
-                None => container,
-            };
-
-            Row::with_children(vec![
-                Text::new(&login_info.server)
-                    .size(input_text_size)
-                    .width(Length::Fill)
-                    .height(Length::Shrink)
-                    .into(),
-                container.into(),
-            ])
-            .align_items(Align::Center)
-            .height(Length::Fill)
-            .into()
+            Text::new(&login_info.server)
+                .size(input_text_size)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
         } else {
             TextInput::new(
                 &mut self.server,
