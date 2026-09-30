@@ -603,10 +603,37 @@ fn directions<S: State>(session: DialogueSession) -> impl Action<S> {
             ));
             responses.push((
                 Content::localized("dialogue-direction-airship_dock"),
-                direction_to_nearest(
-                    |p| p.airship_dock_info().is_some(),
-                    |_| Content::localized("hud-map-airship_dock"),
-                ),
+                now(move |ctx, _| {
+                    let ws = ctx.index.sites.get(ws_id);
+                    let actor_pos = ctx.actor.wpos.xy().as_::<i32>();
+                    let nearest_dock_position = ws
+                        .plots()
+                        .filter_map(|plot| {
+                            plot.airship_dock_info().and_then(|dock_info| {
+                                dock_info.docking_positions.iter().min_by_key(|position| {
+                                    position.xy().distance_squared(actor_pos)
+                                })
+                            })
+                        })
+                        .min_by_key(|position| position.xy().distance_squared(actor_pos));
+                    if let Some(dock_position) = nearest_dock_position {
+                        session
+                            .give_marker(
+                                Marker::at(dock_position.xy().as_())
+                                    .with_label(Content::localized("hud-map-airship_dock")),
+                            )
+                            .then(
+                                session
+                                    .say_statement(Content::localized("npc-response-directions")),
+                            )
+                            .boxed()
+                    } else {
+                        session
+                            .say_statement(Content::localized("npc-response-doesnt_exist"))
+                            .boxed()
+                    }
+                })
+                .boxed(),
             ));
         }
 

@@ -99,7 +99,7 @@ impl DesertCityAirshipDock {
 
         let docking_positions = CARDINALS
             .iter()
-            .map(|dir| (center + dir * 31).with_z(top_floor))
+            .map(|dir| (center + dir * 27).with_z(top_floor))
             .collect::<Vec<_>>();
         Self {
             bounds,
@@ -144,6 +144,14 @@ impl Structure for DesertCityAirshipDock {
         let dist = wpos.as_::<f32>().distance(self.center.as_());
         let weight = (1.0 - (dist - MIN_FLAT_DIST).max(0.0) / SLOPE_LENGTH).max(0.0);
         spawn_rules.prefer_alt(self.alt as f32, weight);
+    }
+
+    fn airship_dock_info(&self) -> Option<AirshipDockInfo<'_>> {
+        Some(AirshipDockInfo {
+            door_tile: self.door_tile,
+            center: self.center,
+            docking_positions: &self.docking_positions,
+        })
     }
 
     fn render_inner(&self, _site: &Site, _land: &Land, painter: &Painter) {

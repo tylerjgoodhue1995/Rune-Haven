@@ -2502,6 +2502,126 @@ mod tests {
     }
 
     #[test]
+    fn default_world_generates_airship_spawn_locations() {
+        let threadpool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let (world, _) = crate::World::generate(
+            crate::sim::DEFAULT_WORLD_SEED,
+            crate::sim::WorldOpts {
+                seed_elements: true,
+                world_file: crate::sim::FileOpts::Generate(crate::sim::GenOpts {
+                    erosion_quality: 0.1,
+                    ..Default::default()
+                }),
+                calendar: None,
+            },
+            &threadpool,
+            &|_| {},
+        );
+        let airships = &world.civs().airships;
+        let capital_count = world
+            .civs()
+            .sites
+            .values()
+            .filter(|site| site.is_capital)
+            .count();
+        let dock_count = airships.airship_docks.len();
+        let capital_docks = world
+            .civs()
+            .sites
+            .values()
+            .filter(|site| site.is_capital)
+            .filter_map(|site| {
+                let site_id = site.site_tmp?;
+                Some((
+                    site.kind,
+                    airships
+                        .airship_docks
+                        .iter()
+                        .filter(|dock| dock.site_id == site_id)
+                        .count(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let world_dims = world.sim().get_aabr();
+        let capital_targets = [
+            Vec2::new(0.20, 0.25),
+            Vec2::new(0.50, 0.72),
+            Vec2::new(0.80, 0.25),
+        ]
+        .map(|fraction| {
+            world_dims.min
+                + (world_dims.max - world_dims.min).map2(fraction, |value, fraction| {
+                    (value as f32 * fraction).round() as i32
+                })
+        });
+        let mut capital_regions = world
+            .civs()
+            .sites
+            .values()
+            .filter(|site| site.is_capital)
+            .map(|site| {
+                capital_targets
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, target)| site.center.distance_squared(**target))
+                    .unwrap()
+                    .0
+            })
+            .collect::<Vec<_>>();
+        capital_regions.sort_unstable();
+
+        assert!(
+            capital_count == 3 && dock_count >= 3,
+            "expected docks for three capitals, found {dock_count} docks and {capital_count} \
+             capitals: {capital_docks:?}"
+        );
+        assert_eq!(capital_regions, vec![0, 1, 2]);
+        for capital in world
+            .civs()
+            .sites
+            .values()
+            .filter(|site| site.is_capital && site.kind == crate::civ::SiteKind::CliffTown)
+        {
+            let site_id = capital.site_tmp.unwrap();
+            let dock = airships
+                .airship_docks
+                .iter()
+                .find(|dock| dock.site_id == site_id)
+                .expect("CliffTown capital should have an airship dock");
+            for docking_position in &dock.docking_positions {
+                assert!((dock.center.distance(docking_position.1.xy()) - 30.0).abs() < 0.1);
+            }
+        }
+        for dock in &airships.airship_docks {
+            let site_kind = world
+                .civs()
+                .sites
+                .values()
+                .find(|site| site.site_tmp == Some(dock.site_id))
+                .expect("airship dock site should exist")
+                .kind;
+            let expected_radius = match site_kind {
+                crate::site::SiteKind::SavannahTown => Some(26.0),
+                crate::site::SiteKind::CoastalTown | crate::site::SiteKind::DesertCity => {
+                    Some(27.0)
+                },
+                _ => None,
+            };
+            if let Some(expected_radius) = expected_radius {
+                for docking_position in &dock.docking_positions {
+                    assert!(
+                        (dock.center.distance(docking_position.1.xy()) - expected_radius).abs()
+                            < 0.1,
+                        "dock position does not match rendered pad for {site_kind:?}"
+                    );
+                }
+            }
+        }
+        assert!(airships.route_count() > 0);
+        assert!(!airships.airship_spawning_locations().is_empty());
+    }
+
+    #[test]
     fn vec_angles_test() {
         let refvec = Vec3::new(0.0f32, 10.0, 0.0);
 

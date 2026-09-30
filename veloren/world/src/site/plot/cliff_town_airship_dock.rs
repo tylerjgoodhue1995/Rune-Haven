@@ -99,7 +99,7 @@ impl CliffTownAirshipDock {
             platform_level += -clearance;
         }
         for dir in CARDINALS {
-            let docking_pos = center + dir * (platform_length + 9);
+            let docking_pos = center + dir * platform_length;
             docking_positions.push(docking_pos.with_z(platform_level + 1));
         }
 

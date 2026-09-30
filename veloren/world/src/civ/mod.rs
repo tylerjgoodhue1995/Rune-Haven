@@ -834,36 +834,46 @@ impl Civs {
     }
 
     fn birth_civ(&mut self, ctx: &mut GenCtx<impl Rng>, capital_index: u32) -> Option<Id<Civ>> {
-        let (target, kind) = match capital_index {
+        let (target, mut kind) = match capital_index {
             0 => (Vec2::new(0.20, 0.25), SiteKind::CliffTown),
             1 => (Vec2::new(0.50, 0.72), SiteKind::DesertCity),
             _ => (Vec2::new(0.80, 0.25), SiteKind::Refactor),
         };
         let world_dims = ctx.sim.get_aabr();
         let target = world_dims.min
-            + (world_dims.max - world_dims.min)
-                .map2(target, |value, fraction| (value as f32 * fraction).round() as i32);
+            + (world_dims.max - world_dims.min).map2(target, |value, fraction| {
+                (value as f32 * fraction).round() as i32
+            });
         let avoid_town_enemies = ProximityRequirementsBuilder::new()
             .avoid_all_of(self.town_enemies(), 60)
             .close_to_one_of(std::iter::once(target), 128)
             .finalize(&world_dims);
-        let town_requirements = ProximityRequirementsBuilder::new()
-            .avoid_all_of(self.town_enemies(), 60)
-            .finalize(&world_dims);
-        let mut choose_town_location = |requirements: &ProximityRequirements| {
-            (0..100)
-                .flat_map(|_| {
-                    find_site_loc(ctx, requirements, &kind).and_then(|loc| {
-                        town_attributes_of_site(loc, ctx.sim)
-                            .map(|town_attrs| (loc, town_attrs.score()))
+        let mut choose_town_location =
+            |requirements: &ProximityRequirements, site_kind: &SiteKind| {
+                (0..100)
+                    .flat_map(|_| {
+                        find_site_loc(ctx, requirements, site_kind).and_then(|loc| {
+                            town_attributes_of_site(loc, ctx.sim)
+                                .map(|town_attrs| (loc, town_attrs.score()))
+                        })
                     })
-                })
-                .take(4)
-                .reduce(|a, b| if a.1 > b.1 { a } else { b })
-                .map(|(loc, _)| loc)
-        };
-        let loc = choose_town_location(&avoid_town_enemies)
-            .or_else(|| choose_town_location(&town_requirements))?;
+                    .take(4)
+                    .reduce(|a, b| if a.1 > b.1 { a } else { b })
+                    .map(|(loc, _)| loc)
+            };
+        let loc = choose_town_location(&avoid_town_enemies, &kind).or_else(|| {
+            if kind == SiteKind::Refactor {
+                return None;
+            }
+            warn!(
+                capital_index,
+                ?kind,
+                "No suitable location found for specialized capital; falling back to a regular \
+                 town"
+            );
+            kind = SiteKind::Refactor;
+            choose_town_location(&avoid_town_enemies, &kind)
+        })?;
 
         // MARKER: CAPITAL CITY - This is one of the 3 continental capitals
         // that will have guaranteed airship docks for blimp transit

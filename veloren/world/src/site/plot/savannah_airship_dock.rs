@@ -87,7 +87,7 @@ impl SavannahAirshipDock {
 
         let docking_positions = CARDINALS
             .iter()
-            .map(|dir| (center + dir * 31).with_z(top_floor))
+            .map(|dir| (center + dir * 26).with_z(top_floor))
             .collect::<Vec<_>>();
         Self {
             door_tile: door_tile_pos,

@@ -92,7 +92,7 @@ impl CoastalAirshipDock {
 
         let docking_positions = CARDINALS
             .iter()
-            .map(|dir| (center + dir * 31).with_z(top_floor - 1))
+            .map(|dir| (center + dir * 27).with_z(top_floor - 1))
             .collect::<Vec<_>>();
         Self {
             door_tile: door_tile_pos,
