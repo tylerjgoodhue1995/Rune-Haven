@@ -34,9 +34,9 @@ nixpkgs.
 If you just want to run the game without installing it, you can do so with:
 ```shell
 # Voxygen (the default):
-nix run gitlab:veloren/veloren
+nix run github:tygood9292/Rune-Haven
 # Server CLI:
-nix run gitlab:veloren/veloren#veloren-server-cli
+nix run github:tygood9292/Rune-Haven#veloren-server-cli
 # or if you have a local repo
 nix run
 nix run .#veloren-server-cli
@@ -45,9 +45,9 @@ nix run .#veloren-server-cli
 To install the game into your user profile:
 ```shell
 # Voxygen:
-nix profile install gitlab:veloren/veloren
+nix profile install github:tygood9292/Rune-Haven
 # Server CLI:
-nix profile install gitlab:veloren/veloren#veloren-server-cli
+nix profile install github:tygood9292/Rune-Haven#veloren-server-cli
 # or if you have a local repo:
 nix profile install
 nix profile install .#veloren-server-cli
@@ -57,7 +57,7 @@ To install (for example) Voxygen on your system, the NixOS configuration (if you
 ```nix
 { description = "NixOS configuration with flakes";
 
-  inputs.veloren.url = gitlab:veloren/veloren;
+  inputs.veloren.url = github:tygood9292/Rune-Haven;
 
   outputs = { self, nixpkgs, veloren }: {
     nixosConfigurations.<your-hostname> = nixpkgs.lib.nixosSystem rec {
@@ -145,9 +145,9 @@ You can use the `bundle` subcommand to bundle the game into a single distro-agno
 ```shell
 ## bundling latest commit to master
 # Voxygen:
-nix bundle gitlab:veloren/veloren
+nix bundle github:tygood9292/Rune-Haven
 # Server CLI:
-nix bundle gitlab:veloren/veloren#veloren-server-cli
+nix bundle github:tygood9292/Rune-Haven#veloren-server-cli
 ## for local repo:
 # Voxygen:
 nix bundle .#veloren-voxygen

@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  VELOREN_GIT_VERSION: "/0/0"
+  VELOREN_USERDATA_STRATEGY: "executable"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x86_64
+            ext: .exe
+          - os: macos-latest
+            name: macos-aarch64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build server-cli
+        run: cargo build --release -p veloren-server-cli
+
+      - name: Build auth service
+        run: cargo build --release --manifest-path auth-service/Cargo.toml --bin veloren-beta-auth
+
+      - name: Build voxygen
+        run: cargo build --release -p veloren-voxygen
+
+      - name: Stage release package
+        shell: bash
+        run: |
+          set -eux
+          stage="veloren-${{ matrix.name }}"
+          mkdir -p "$stage/assets"
+          cp -R assets/. "$stage/assets/"
+          cp target/release/veloren-server-cli${{ matrix.ext }} "$stage/"
+          cp target/release/veloren-beta-auth${{ matrix.ext }} "$stage/"
+          cp target/release/veloren-voxygen${{ matrix.ext }} "$stage/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$stage.zip" "$stage"
+          else
+            zip -r "$stage.zip" "$stage"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: veloren-${{ matrix.name }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          generate_release_notes: true

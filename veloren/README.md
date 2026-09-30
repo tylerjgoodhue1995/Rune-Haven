@@ -6,11 +6,8 @@
 
 [![discord](https://img.shields.io/discord/449602562165833758?logo=discord&logoColor=%23f8f8f8&label=discord&color=%23788dd5)](https://veloren.net/discord)
 [![zulip](https://img.shields.io/badge/zulip-join_chat-dodgerblue.svg?logo=zulip)](https://veloren.net/zulip)
-[![pipeline status](https://gitlab.com/veloren/veloren/badges/master/pipeline.svg)](https://gitlab.com/veloren/veloren/-/pipelines)
-[![coverage report](https://gitlab.com/veloren/veloren/badges/master/coverage.svg)](https://gitlab.com/veloren/veloren/-/graphs/master/charts)
+[![build status](https://github.com/tygood9292/Rune-Haven/actions/workflows/ci.yml/badge.svg)](https://github.com/tygood9292/Rune-Haven/actions/workflows/ci.yml)
 [![translation status](https://translate.codeberg.org/widgets/veloren/-/svg-badge.svg)](https://translate.codeberg.org/engage/veloren/)
-[![dependency status](https://deps.rs/repo/gitlab/veloren/veloren/status.svg)](https://deps.rs/repo/gitlab/veloren/veloren)
-[![code contributor count](https://img.shields.io/gitlab/contributors/veloren%2Fveloren?label=code%20contributors&color=darkgreen)](https://gitlab.com/veloren/veloren/-/graphs/master)
 [![financial contributor count](https://img.shields.io/opencollective/all/veloren?label=financial%20contributors&color=darkgreen)](https://opencollective.com/veloren)
 
 <a href="https://veloren.net/donate" target="_blank">
@@ -54,7 +51,7 @@ Information repository about the game made by and for players.
 [The book](https://book.veloren.net) -
 Supplementary information useful both for players and contributors.
 
-[Future plans](https://gitlab.com/veloren/veloren/-/milestones) -
+[Future plans](https://github.com/tygood9292/Rune-Haven/milestones) -
 Development roadmap and issue tracker.
 
 [Code of conduct](https://veloren.net/code-of-conduct) -
