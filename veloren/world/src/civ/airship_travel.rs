@@ -1111,6 +1111,25 @@ impl Airships {
         _sampler: Option<&WorldSim>,
         _map_image_path: Option<&str>,
     ) {
+        self.generate_airship_routes_inner_with_capitals(
+            map_size_lg,
+            seed,
+            _index,
+            _sampler,
+            _map_image_path,
+            &[],
+        );
+    }
+
+    fn generate_airship_routes_inner_with_capitals(
+        &mut self,
+        map_size_lg: &MapSizeLg,
+        seed: u32,
+        _index: Option<&Index>,
+        _sampler: Option<&WorldSim>,
+        _map_image_path: Option<&str>,
+        capital_dock_indices: &[usize],
+    ) {
         let all_dock_points = self
             .airship_docks
             .iter()
@@ -1121,11 +1140,7 @@ impl Airships {
             .collect::<Vec<_>>();
         debug_airships!(4, "all_dock_points: {:?}", all_dock_points);
 
-        // MARKER: CAPITAL BLIMP TRANSIT - Prioritize the 3 capital city docks
-        // The first 3 docks in the list should be the capital city docks (since capitals
-        // are generated first), ensuring they form the core triangular transit network
-        let capital_dock_count = all_dock_points.len().min(3);
-        debug_airships!(4, "Capital dock count: {}", capital_dock_count);
+        debug_airships!(4, "Capital dock indices: {:?}", capital_dock_indices);
 
         if all_dock_points.len() < 3 {
             return;
@@ -1198,7 +1213,7 @@ impl Airships {
         // MARKER: CAPITAL BLIMP TRANSIT - Increase iterations for capital connectivity
         // Ensure the 3 capital docks get well-connected by increasing max iterations
         // when we have enough docks to support a good network
-        let max_iterations = if capital_dock_count >= 3 {
+        let max_iterations = if capital_dock_indices.len() == 3 {
             max_iterations.max(20) // Ensure at least 20 iterations for capital connectivity
         } else {
             max_iterations
@@ -1257,19 +1272,7 @@ impl Airships {
             }
 
             let mut route_segments = best_segments;
-            if capital_dock_count >= 3 {
-                // Keep every route loop connected to all three capital docks so every
-                // settlement can reach each capital without changing the route model.
-                for segment in &mut route_segments {
-                    let closing_node = segment.pop().expect("route segments are closed");
-                    for capital_node in (0..3).rev() {
-                        if !segment.contains(&capital_node) {
-                            segment.push(capital_node);
-                        }
-                    }
-                    segment.push(closing_node);
-                }
-            }
+            include_capital_docks_in_routes(&mut route_segments, capital_dock_indices);
 
             self.routes = self.create_route_legs(
                 &route_segments,
@@ -1284,16 +1287,43 @@ impl Airships {
             // MARKER: CAPITAL BLIMP TRANSIT - Verify capital connectivity
             #[cfg(debug_assertions)]
             {
-                if capital_dock_count >= 3 {
-                    debug_airships!(4, "Checking capital connectivity in {} routes", self.routes.len());
+                if capital_dock_indices.len() == 3 {
+                    debug_airships!(
+                        4,
+                        "Checking capital connectivity in {} routes",
+                        self.routes.len()
+                    );
                     // Log the routes to verify the 3 capitals are connected
                     for (route_idx, route) in self.routes.iter().enumerate() {
-                        let capital_docks_in_route = route.legs.iter()
-                            .filter(|leg| leg.dest_index < capital_dock_count)
+                        let capital_docks_in_route = route
+                            .legs
+                            .iter()
+                            .filter(|leg| capital_dock_indices.contains(&leg.dest_index))
                             .count();
-                        debug_airships!(4, "Route {} has {} capital docks", route_idx, capital_docks_in_route);
+                        debug_airships!(
+                            4,
+                            "Route {} has {} capital docks",
+                            route_idx,
+                            capital_docks_in_route
+                        );
                     }
                 }
+            }
+
+            if capital_dock_indices.len() == 3
+                && (self.routes.is_empty()
+                    || self.routes.iter().any(|route| {
+                        capital_dock_indices.iter().any(|capital_index| {
+                            !route
+                                .legs
+                                .iter()
+                                .any(|leg| leg.dest_index == *capital_index)
+                        })
+                    }))
+            {
+                error!("Generated airship routes do not connect all three capital docks");
+                self.routes.clear();
+                return;
             }
 
             // Calculate the spawning locations for airships on the routes.
@@ -1334,18 +1364,31 @@ impl Airships {
         }
     }
 
-    pub fn generate_airship_routes(&mut self, world_sim: &mut WorldSim, index: &Index) {
+    pub fn generate_airship_routes(
+        &mut self,
+        world_sim: &mut WorldSim,
+        index: &Index,
+        capital_site_ids: &[Id<site::Site>],
+    ) {
         self.airship_docks = Airships::all_airshipdock_positions(&index.sites);
 
-        // MARKER: CAPITAL BLIMP TRANSIT - Ensure 3 continental capitals are connected
-        // The capital cities have guaranteed airship docks and should form a triangular
-        // transit network for intercontinental travel
-        self.generate_airship_routes_inner(
+        let capital_dock_indices = find_capital_dock_indices(&self.airship_docks, capital_site_ids);
+        if capital_dock_indices.len() != 3 {
+            error!(
+                "Expected airship docks at all three capital cities, found {}",
+                capital_dock_indices.len()
+            );
+            self.routes.clear();
+            return;
+        }
+
+        self.generate_airship_routes_inner_with_capitals(
             &world_sim.map_size_lg(),
             index.seed,
             Some(index),
             Some(world_sim),
             None,
+            &capital_dock_indices,
         );
     }
 
@@ -2379,10 +2422,84 @@ fn best_eulerian_circuit_segments(
     Some((best_segments, max_segments_count, min_segments_len_spread))
 }
 
+fn include_capital_docks_in_routes(
+    route_segments: &mut [Vec<usize>],
+    capital_dock_indices: &[usize],
+) {
+    if capital_dock_indices.len() != 3 {
+        return;
+    }
+
+    for segment in route_segments {
+        let closing_node = segment.pop().expect("route segments are closed");
+        for &capital_index in capital_dock_indices.iter().rev() {
+            if !segment.contains(&capital_index) {
+                segment.push(capital_index);
+            }
+        }
+        segment.push(closing_node);
+    }
+}
+
+fn find_capital_dock_indices(
+    airship_docks: &[AirshipDockPositions],
+    capital_site_ids: &[Id<site::Site>],
+) -> Vec<usize> {
+    capital_site_ids
+        .iter()
+        .filter_map(|site_id| {
+            airship_docks
+                .iter()
+                .position(|dock| dock.site_id == *site_id)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AirshipDockPlatform, AirshipDockingSide, Airships, approx::assert_relative_eq};
+    use super::{
+        AirshipDockPlatform, AirshipDockPositions, AirshipDockingSide, Airships,
+        approx::assert_relative_eq, find_capital_dock_indices, include_capital_docks_in_routes,
+    };
     use vek::{Vec2, Vec3};
+
+    fn dock(site_id: u64) -> AirshipDockPositions {
+        AirshipDockPositions {
+            center: Vec2::zero(),
+            docking_positions: Vec::new(),
+            site_id: common::store::Id::new(site_id),
+        }
+    }
+
+    #[test]
+    fn capital_dock_lookup_uses_site_ids() {
+        let airship_docks = vec![dock(99), dock(20), dock(30), dock(10)];
+        let capital_site_ids = [
+            common::store::Id::<super::site::Site>::new(10),
+            common::store::Id::<super::site::Site>::new(20),
+            common::store::Id::<super::site::Site>::new(30),
+        ];
+
+        assert_eq!(
+            find_capital_dock_indices(&airship_docks, &capital_site_ids),
+            vec![3, 1, 2]
+        );
+    }
+
+    #[test]
+    fn every_route_includes_all_capital_docks() {
+        let capital_dock_indices = [3, 0, 2];
+        let mut route_segments = vec![vec![6, 4, 6], vec![0, 5, 1, 0]];
+
+        include_capital_docks_in_routes(&mut route_segments, &capital_dock_indices);
+
+        for segment in route_segments {
+            assert_eq!(segment.first(), segment.last());
+            for capital_index in capital_dock_indices {
+                assert!(segment[..segment.len() - 1].contains(&capital_index));
+            }
+        }
+    }
 
     #[test]
     fn vec_angles_test() {

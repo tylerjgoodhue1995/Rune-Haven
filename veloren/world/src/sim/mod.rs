@@ -1114,18 +1114,39 @@ impl WorldSim {
             // rotations, and vertical offsets. They are deliberately not
             // arranged along one horizontal line.
             let continents = [
-                // A tall, slightly tilted western continent.
-                (0.20, 0.25, 0.15, 0.32, -0.28, 0.0, 0.0),
-                // A broad, lower central continent, kept well away from the
-                // western and eastern shorelines.
-                (0.50, 0.72, 0.18, 0.19, 0.20, 1.7, 2.4),
-                // A tall, offset eastern continent with a stronger tilt.
-                (0.80, 0.25, 0.15, 0.31, 0.58, 3.9, 4.6),
+                // Eldoria: a long, rolling north-south heartland.
+                (
+                    0.20, 0.25, 0.165, 0.37, -0.28, 0.0, 0.0, 0.18, 0.10, 0.10, 0.10, false,
+                ),
+                // Vhaldris: a broad frontier with a hard mountain spine.
+                (
+                    0.50, 0.72, 0.22, 0.24, 0.20, 1.7, 2.4, -0.05, -0.28, 0.12, 0.16, true,
+                ),
+                // Aelwyn: a long, tilted forest continent with its own range.
+                (
+                    0.80, 0.25, 0.17, 0.36, 0.58, 3.9, 4.6, -0.18, 0.20, 0.09, 0.11, false,
+                ),
             ];
 
             let mut continentalness = 0.0f64;
+            let mut mountain_range_height = 0.0f64;
+            let mut volcanic_relief = 0.0f64;
 
-            for &(cx, cy, rx, ry, angle, noise_x, noise_y) in &continents {
+            for &(
+                cx,
+                cy,
+                rx,
+                ry,
+                angle,
+                noise_x,
+                noise_y,
+                range_offset,
+                range_slope,
+                range_width,
+                range_strength,
+                has_volcanic_fields,
+            ) in &continents
+            {
                 let offset_x = nx - cx;
                 let offset_y = ny - cy;
                 let cos_angle = angle.cos();
@@ -1136,6 +1157,36 @@ impl WorldSim {
                 let dy = rotated_y / ry;
 
                 let distance = (dx * dx + dy * dy).sqrt();
+                let range_wobble = gen_ctx
+                    .small_nz
+                    .get([nx * 7.0 + noise_x, ny * 7.0 + noise_y])
+                    * 0.04;
+                let range_distance = (dx - (range_offset + dy * range_slope + range_wobble)).abs();
+                let range_profile = (1.0 - range_distance / range_width).clamp(0.0, 1.0);
+                let range_ends = (1.0 - (dy.abs() / 0.92).powi(8)).clamp(0.0, 1.0);
+                let range_detail = gen_ctx
+                    .small_nz
+                    .get([nx * 24.0 + noise_x * 1.7, ny * 24.0 + noise_y * 1.7])
+                    .abs();
+                let range_height = range_profile
+                    * range_ends
+                    * range_strength
+                    * (0.72 + (1.0 - range_detail) * 0.28);
+                mountain_range_height = mountain_range_height.max(range_height);
+
+                if has_volcanic_fields {
+                    for (caldera_x, caldera_y, radius) in [
+                        (-0.10, -0.55, 0.13),
+                        (0.05, -0.02, 0.16),
+                        (-0.20, 0.52, 0.13),
+                    ] {
+                        let caldera_distance =
+                            Vec2::new(dx - caldera_x, dy - caldera_y).magnitude();
+                        let rim = (1.0 - (caldera_distance - radius).abs() / 0.045).clamp(0.0, 1.0);
+                        let basin = (1.0 - caldera_distance / (radius * 0.72)).clamp(0.0, 1.0);
+                        volcanic_relief += rim * 0.08 - basin * 0.035;
+                    }
+                }
 
                 // Convert distance into a smooth continental mask.
                 let mut shape = 1.0 - distance;
@@ -1224,9 +1275,11 @@ impl WorldSim {
                 //
                 // This means mountains/hills/valleys are still generated
                 // by Veloren rather than being replaced by flat land.
-                let continental_height = land_factor * 0.32 - (1.0 - land_factor) * 0.08;
+                let continental_height = land_factor * 0.27 - (1.0 - land_factor) * 0.08;
 
-                let blended_height = original_height * 0.72 + continental_height;
+                let blended_height = original_height * 0.50
+                    + continental_height
+                    + (mountain_range_height + volcanic_relief) * land_factor;
 
                 alt_old[posi].1 = blended_height.max(0.015) as f32;
             }
@@ -2763,9 +2816,9 @@ impl SimChunk {
             pos.y as f32 / (map_size_lg.chunks().y.saturating_sub(1) as f32).max(1.0),
         );
         let continent_profiles = [
-            (Vec2::new(0.20, 0.25), 0.15, 0.32), // northern snow continent
-            (Vec2::new(0.50, 0.72), 0.55, -0.45), // warm, dry badlands
-            (Vec2::new(0.80, 0.25), 0.05, 0.12), // temperate mixed-biome continent
+            (Vec2::new(0.20, 0.25), 0.02, 0.08), // Eldoria: temperate heartlands
+            (Vec2::new(0.50, 0.72), 0.22, -0.30), // Vhaldris: warm, dry frontier
+            (Vec2::new(0.80, 0.25), 0.30, 0.26), // Aelwyn: warm, verdant wilds
         ];
         let (profile_temp, profile_humidity) = continent_profiles
             .iter()

@@ -488,10 +488,24 @@ impl Site {
         area_range: Range<u32>,
         min_dims: Extent2<u32>,
     ) -> Option<(Aabr<i32>, Vec2<i32>, Vec2<i32>, Option<i32>)> {
+        self.find_roadside_aabr_in_district(rng, None, area_range, min_dims)
+    }
+
+    fn find_roadside_aabr_in_district(
+        &mut self,
+        rng: &mut impl Rng,
+        district_plaza: Option<Id<Plot>>,
+        area_range: Range<u32>,
+        min_dims: Extent2<u32>,
+    ) -> Option<(Aabr<i32>, Vec2<i32>, Vec2<i32>, Option<i32>)> {
         let dir = Vec2::<f32>::zero()
             .map(|_| rng.random_range(-1.0..1.0))
             .normalized();
-        let search_pos = if rng.random() {
+        let search_pos = if let Some(plaza) = district_plaza {
+            let plot = self.plot(plaza);
+            let sz = plot.find_bounds().size();
+            plot.root_tile + dir.map(|e: f32| e.round() as i32) * (sz + 1)
+        } else if rng.random() {
             let plot = self.plot(*self.plazas.choose(rng)?);
             let sz = plot.find_bounds().size();
             plot.root_tile + dir.map(|e: f32| e.round() as i32) * (sz + 1)
@@ -521,11 +535,23 @@ impl Site {
         area_range: Range<u32>,
         min_dims: Extent2<u32>,
     ) -> Option<(Aabr<i32>, Vec2<i32>, Vec2<i32>, Option<i32>)> {
-        // Choose a random plaza as the center of our search
-        let search_center = self
-            .plazas
-            .choose(rng)
-            .map(|&p| self.plot(p).root_tile)
+        self.find_rural_aabr_in_district(rng, None, area_range, min_dims)
+    }
+
+    fn find_rural_aabr_in_district(
+        &mut self,
+        rng: &mut impl Rng,
+        district_plaza: Option<Id<Plot>>,
+        area_range: Range<u32>,
+        min_dims: Extent2<u32>,
+    ) -> Option<(Aabr<i32>, Vec2<i32>, Vec2<i32>, Option<i32>)> {
+        let search_center = district_plaza
+            .map(|plaza| self.plot(plaza).root_tile)
+            .or_else(|| {
+                self.plazas
+                    .choose(rng)
+                    .map(|&plaza| self.plot(plaza).root_tile)
+            })
             .unwrap_or_default();
 
         // Search in a random direction from the plaza
@@ -1268,16 +1294,58 @@ impl Site {
         generator_stats.add(site.name(), GenStatSiteKind::City);
         site.make_initial_plaza_default(land, index, &mut rng, generator_stats, &name, road_kind);
 
-        let build_chance = Lottery::from(vec![
-            (64.0, 1), // house
-            (5.0, 2),  // guard tower
-            (25.0, 3), // field
-            //(32.0, 4), // castle
-            (5.0, 5),  // workshop
-            (15.0, 6), // airship dock
-            (15.0, 7), // tavern
-            (5.0, 8),  // barn
-        ]);
+        let center_plaza = site.plazas.first().copied();
+        let mut satellite_plazas = Vec::new();
+        if size >= 0.35
+            && let Some(center_plaza) = center_plaza
+        {
+            let center = site.plot(center_plaza).root_tile;
+            let rotation = rng.random_range(0..CARDINALS.len());
+            for &direction in CARDINALS
+                .iter()
+                .cycle()
+                .skip(rotation)
+                .take(CARDINALS.len())
+            {
+                let plaza_center = center + direction * 24;
+                let plaza_aabr = Aabr {
+                    min: plaza_center - Vec2::broadcast(1),
+                    max: plaza_center + Vec2::broadcast(2),
+                };
+                if aabr_tiles(plaza_aabr).all(|tile| site.tiles.get(tile).is_empty()) {
+                    if let Some(plaza) =
+                        site.make_plaza_at(land, index, plaza_aabr, &mut rng, road_kind)
+                    {
+                        satellite_plazas.push(plaza);
+                    }
+                }
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        enum CityDistrict {
+            Civic,
+            Commercial,
+            Residential,
+            Agricultural,
+        }
+
+        let civic_builds = Lottery::from(vec![(55.0, 1), (20.0, 5), (25.0, 7)]);
+        let commercial_builds = Lottery::from(vec![(35.0, 1), (30.0, 5), (35.0, 7)]);
+        let residential_builds = Lottery::from(vec![(90.0, 1), (10.0, 7)]);
+        let agricultural_builds = Lottery::from(vec![(30.0, 1), (50.0, 3), (20.0, 8)]);
+
+        let commercial_plaza = satellite_plazas.first().copied().or(center_plaza);
+        let residential_plaza = satellite_plazas
+            .get(1)
+            .or_else(|| satellite_plazas.get(2))
+            .copied()
+            .or(commercial_plaza);
+        let agricultural_plaza = satellite_plazas
+            .get(3)
+            .copied()
+            .or(residential_plaza)
+            .or(center_plaza);
 
         // These plots have minimums or limits.
         let mut workshops = 0;
@@ -1285,7 +1353,31 @@ impl Site {
         let mut taverns = 0;
         let mut airship_docks = 0;
 
-        for _ in 0..(size * 200.0) as i32 {
+        let plot_attempts = (size * 200.0) as usize;
+        for attempt_index in 0..plot_attempts {
+            let district = match attempt_index % 10 {
+                0 => CityDistrict::Civic,
+                1..=2 => CityDistrict::Commercial,
+                3..=7 => CityDistrict::Residential,
+                _ => CityDistrict::Agricultural,
+            };
+            let district_plaza = match district {
+                CityDistrict::Civic => center_plaza,
+                CityDistrict::Commercial => commercial_plaza,
+                CityDistrict::Residential => residential_plaza,
+                CityDistrict::Agricultural => agricultural_plaza,
+            };
+            let district_plaza = if is_capital && airship_docks == 0 {
+                commercial_plaza
+            } else {
+                district_plaza
+            };
+            let build_chance = match district {
+                CityDistrict::Civic => &civic_builds,
+                CityDistrict::Commercial => &commercial_builds,
+                CityDistrict::Residential => &residential_builds,
+                CityDistrict::Agricultural => &agricultural_builds,
+            };
             let build = if is_capital && airship_docks == 0 {
                 6
             } else {
@@ -1297,8 +1389,9 @@ impl Site {
                     generator_stats.attempt(site.name(), GenStatPlotKind::Workshop);
                     let size = (3.0 + rng.random::<f32>().powf(5.0) * 1.5).round() as u32;
                     if let Some((aabr, door_tile, door_dir, alt)) = attempt(32, || {
-                        site.find_roadside_aabr(
+                        site.find_roadside_aabr_in_district(
                             &mut rng,
+                            district_plaza,
                             4..(size + 1).pow(2),
                             Extent2::broadcast(size),
                         )
@@ -1335,8 +1428,9 @@ impl Site {
                     let size = (1.5 + rng.random::<f32>().powf(5.0) * 1.0).round() as u32;
                     generator_stats.attempt(site.name(), GenStatPlotKind::House);
                     if let Some((aabr, door_tile, door_dir, alt)) = attempt(32, || {
-                        site.find_roadside_aabr(
+                        site.find_roadside_aabr_in_district(
                             &mut rng,
+                            district_plaza,
                             4..(size + 1).pow(2),
                             Extent2::broadcast(size),
                         )
@@ -1394,7 +1488,13 @@ impl Site {
                 },
                 // Field
                 3 => {
-                    Self::generate_farm(false, &mut rng, &mut site, land);
+                    Self::generate_farm_in_district(
+                        false,
+                        &mut rng,
+                        &mut site,
+                        land,
+                        district_plaza,
+                    );
                 },
                 // Castle
                 4 if size > 0.2 && castles < 1 => {
@@ -1560,7 +1660,12 @@ impl Site {
                     let dock_chance = if is_capital { 1.0 } else { 0.0 };
                     if rng.random::<f32>() < dock_chance {
                         if let Some((aabr, door_tile, door_dir, _)) = attempt(32, || {
-                            site.find_roadside_aabr(&mut rng, 81..82, Extent2::broadcast(size))
+                            site.find_roadside_aabr_in_district(
+                                &mut rng,
+                                district_plaza,
+                                81..82,
+                                Extent2::broadcast(size),
+                            )
                         }) {
                             let airship_dock = plot::AirshipDock::generate(
                                 land,
@@ -1596,8 +1701,9 @@ impl Site {
                     generator_stats.attempt(site.name(), GenStatPlotKind::Tavern);
                     let size = (4.5 + rng.random::<f32>().powf(5.0) * 2.0).round() as u32;
                     if let Some((aabr, door_tile, door_dir, alt)) = attempt(32, || {
-                        site.find_roadside_aabr(
+                        site.find_roadside_aabr_in_district(
                             &mut rng,
+                            district_plaza,
                             8..(size + 1).pow(2),
                             Extent2::broadcast(size),
                         )
@@ -1632,7 +1738,14 @@ impl Site {
                     }
                 },
                 8 => {
-                    Self::generate_barn(false, &mut rng, &mut site, land, index);
+                    Self::generate_barn_in_district(
+                        false,
+                        &mut rng,
+                        &mut site,
+                        land,
+                        index,
+                        district_plaza,
+                    );
                 },
                 _ => {},
             }
@@ -2563,13 +2676,28 @@ impl Site {
 
     pub fn generate_farm(
         is_desert: bool,
-        mut rng: &mut impl Rng,
+        rng: &mut impl Rng,
         site: &mut Site,
         land: &Land,
     ) -> bool {
+        Self::generate_farm_in_district(is_desert, rng, site, land, None)
+    }
+
+    fn generate_farm_in_district(
+        is_desert: bool,
+        mut rng: &mut impl Rng,
+        site: &mut Site,
+        land: &Land,
+        district_plaza: Option<Id<Plot>>,
+    ) -> bool {
         let size = (3.0 + rng.random::<f32>().powf(5.0) * 6.0).round() as u32;
         if let Some((aabr, door_tile, door_dir, _alt)) = attempt(32, || {
-            site.find_rural_aabr(&mut rng, 6..(size + 1).pow(2), Extent2::broadcast(size))
+            site.find_rural_aabr_in_district(
+                &mut rng,
+                district_plaza,
+                6..(size + 1).pow(2),
+                Extent2::broadcast(size),
+            )
         }) {
             let field = plot::FarmField::generate(
                 land,
@@ -2601,14 +2729,30 @@ impl Site {
 
     pub fn generate_barn(
         is_desert: bool,
-        mut rng: &mut impl Rng,
+        rng: &mut impl Rng,
         site: &mut Site,
         land: &Land,
         index: IndexRef,
     ) -> bool {
+        Self::generate_barn_in_district(is_desert, rng, site, land, index, None)
+    }
+
+    fn generate_barn_in_district(
+        is_desert: bool,
+        mut rng: &mut impl Rng,
+        site: &mut Site,
+        land: &Land,
+        index: IndexRef,
+        district_plaza: Option<Id<Plot>>,
+    ) -> bool {
         let size = (7.0 + rng.random::<f32>().powf(5.0) * 1.5).round() as u32;
         if let Some((aabr, door_tile, door_dir, _alt)) = attempt(32, || {
-            site.find_rural_aabr(&mut rng, 7..(size + 1).pow(2), Extent2::broadcast(size))
+            site.find_rural_aabr_in_district(
+                &mut rng,
+                district_plaza,
+                7..(size + 1).pow(2),
+                Extent2::broadcast(size),
+            )
         }) {
             let bounds = Aabr {
                 min: site.tile_wpos(aabr.min),

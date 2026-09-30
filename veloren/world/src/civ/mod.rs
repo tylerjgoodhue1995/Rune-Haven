@@ -709,7 +709,13 @@ impl Civs {
         }
 
         prof_span!(guard, "generate airship routes");
-        this.airships.generate_airship_routes(ctx.sim, index);
+        let capital_site_ids = this
+            .civs
+            .values()
+            .filter_map(|civ| this.sites.get(civ.capital).site_tmp)
+            .collect::<Vec<_>>();
+        this.airships
+            .generate_airship_routes(ctx.sim, index, &capital_site_ids);
         info!(
             capital_count = this.civs.values().count(),
             citadel_count = this
