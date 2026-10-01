@@ -49,10 +49,6 @@ jobs:
       - name: Build voxygen
         run: cargo build --release -p veloren-voxygen
 
-      - name: Build Airshipper
-        working-directory: airshipper
-        run: cargo build --release -p airshipper --features runehaven
-
       - name: Stage release package
         shell: bash
         run: |
@@ -68,24 +64,10 @@ jobs:
           else
             (cd "$stage" && zip -r "../$stage.zip" *)
           fi
-          launcher_stage="../airshipper-${{ matrix.name }}"
-          mkdir -p "$launcher_stage"
-          cp ../airshipper/target/release/airshipper${{ matrix.ext }} "$launcher_stage/"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            (cd "$launcher_stage" && 7z a "../airshipper-${{ matrix.name }}.zip" *)
-          else
-            (cd "$launcher_stage" && zip -r "../airshipper-${{ matrix.name }}.zip" *)
-          fi
-
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: veloren/veloren-${{ matrix.name }}.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: airshipper-${{ matrix.name }}
-          path: airshipper-${{ matrix.name }}.zip
 
   release:
     needs: build
