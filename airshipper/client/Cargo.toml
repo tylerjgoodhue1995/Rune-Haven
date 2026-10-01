@@ -1,0 +1,117 @@
+[package]
+name = "airshipper"
+description = "Provides automatic updates for the voxel RPG Veloren."
+version = "0.17.0"
+edition = "2024"
+publish = true
+default-run = "airshipper"
+exclude = ["assets/fonts/GoNotoCurrent.ttf"]
+
+license = "GPL-3.0"
+homepage = "https://github.com/tylerjgoodhue1995/Rune-Haven"
+repository = "https://github.com/tylerjgoodhue1995/Rune-Haven/tree/release/0.18.2/airshipper"
+
+[package.metadata.nix]
+build = true
+app = true
+
+[package.metadata.nix.desktopFile]
+name = "Airshipper"
+icon = "./client/assets/logo.ico"
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[features]
+# Windows cannot bundle ssl by default and as such this feature exists
+# to bundle ssl in CI.
+bundled = ["openssl-sys"]
+bundled_font = []
+runehaven = []
+
+[dependencies]
+veloren-serverbrowser-api = "0.4.0"
+veloren-query-server = { version = "0.1.2", default-features = false, features = [
+    "client",
+] }
+
+# Cli
+clap = { version = "4.5.21", features = ["cargo", "derive"] }
+indicatif = "0.18"
+rustyline = "17"
+colored = "3"
+
+# UI
+iced = { version = "0.14.0", features = [
+    "tokio",
+    "image",
+    "debug",
+    "advanced",
+] }
+rfd = "0.17.2"
+
+# Logging
+tracing = { workspace = true }
+tracing-futures = { workspace = true }
+tracing-subscriber = { workspace = true }
+termcolor = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-log = { workspace = true }
+regex = { workspace = true }
+# Networking
+reqwest = { workspace = true, features = ["json"] }
+
+# Parsing
+pulldown-cmark = "0.13"
+strip_markdown = "0.2.0"
+html2text = "0.15"
+serde = { workspace = true }
+semver = "1"
+rss = "2.0.7"
+ron = { workspace = true }
+remozipsy = "0.2.0"
+crc32fast = "1.4.2"
+flate2 = "1.0"
+url = { workspace = true }
+# Other
+image = { version = "0.25.5", default-features = false, features = [
+    "ico",
+    "jpeg",
+    "png",
+    "webp",
+] }
+tokio = { workspace = true, features = [
+    "macros",
+    "io-util",
+    "process",
+    "net",
+    "sync",
+] }
+tokio-stream = { version = "0.1.6", features = ["io-util"] }
+futures-util = "0.3.15"
+derive_more = { workspace = true }
+find_folder = "0.3.0"
+lazy_static = { workspace = true }
+thiserror = { workspace = true }
+bytesize = { workspace = true }
+bytes = { workspace = true }
+opener = "0.8"
+dirs = { package = "dirs-next", version = "2.0.0" }
+rand = "0.9"
+chrono = { workspace = true }
+country-parser = "0.1.1"
+
+# bundle all the things!
+openssl-sys = { version = "0.9", features = ["vendored"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_UI",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+self_update = { version = "0.42", features = ["archive-zip"] }
+
+[build-dependencies]
+winresource = "0.1.15"

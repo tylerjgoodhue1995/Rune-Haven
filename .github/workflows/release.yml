@@ -27,7 +27,7 @@ jobs:
             ext: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           lfs: true
 
@@ -47,6 +47,14 @@ jobs:
       - name: Build voxygen
         run: cargo build --release -p veloren-voxygen
 
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-06-13
+
+      - name: Build Airshipper
+        working-directory: airshipper
+        run: cargo build --release -p airshipper --features runehaven
+
       - name: Stage release package
         shell: bash
         run: |
@@ -58,15 +66,28 @@ jobs:
           cp target/release/veloren-beta-auth${{ matrix.ext }} "$stage/"
           cp target/release/veloren-voxygen${{ matrix.ext }} "$stage/"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "$stage.zip" "$stage"
+            (cd "$stage" && 7z a "../$stage.zip" *)
           else
-            zip -r "$stage.zip" "$stage"
+            (cd "$stage" && zip -r "../$stage.zip" .)
+          fi
+          launcher_stage="../airshipper-${{ matrix.name }}"
+          mkdir -p "$launcher_stage"
+          cp ../airshipper/target/release/airshipper${{ matrix.ext }} "$launcher_stage/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd "$launcher_stage" && 7z a "../airshipper-${{ matrix.name }}.zip" *)
+          else
+            (cd "$launcher_stage" && zip -r "../airshipper-${{ matrix.name }}.zip" .)
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: veloren/veloren-${{ matrix.name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airshipper-${{ matrix.name }}
+          path: airshipper-${{ matrix.name }}.zip
 
   release:
     needs: build
@@ -78,8 +99,21 @@ jobs:
         with:
           path: artifacts
 
+      - name: Create launcher metadata
+        run: |
+          printf '%s\n' "$GITHUB_REF_NAME" > version.txt
+          printf '["weekly"]\n' > channels.json
+          printf '{"version":1}\n' > api-version.json
+          printf '{"message":null,"last_change":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > announcement.json
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip
+          files: |
+            artifacts/**/*.zip
+            veloren/version.txt
+            veloren/channels.json
+            veloren/api-version.json
+            veloren/announcement.json
           generate_release_notes: true
+          overwrite_files: true

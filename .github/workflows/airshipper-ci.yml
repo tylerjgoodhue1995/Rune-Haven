@@ -1,0 +1,31 @@
+name: Airshipper CI
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "airshipper/**"
+      - ".github/workflows/airshipper-ci.yml"
+  pull_request:
+    paths:
+      - "airshipper/**"
+      - ".github/workflows/airshipper-ci.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-06-13
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: airshipper
+      - name: Check formatting
+        run: cargo fmt --manifest-path airshipper/Cargo.toml --all --check
+      - name: Check Runehaven launcher
+        run: cargo check --manifest-path airshipper/client/Cargo.toml --features runehaven
