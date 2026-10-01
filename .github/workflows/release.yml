@@ -80,6 +80,7 @@ jobs:
           path: artifacts
 
       - name: Create launcher metadata
+        working-directory: ${{ github.workspace }}
         run: |
           printf '%s' "$GITHUB_REF_NAME" > version.txt
           printf '["weekly"]\n' > channels.json
@@ -91,9 +92,9 @@ jobs:
         with:
           files: |
             artifacts/**/*.zip
-            veloren/version.txt
-            veloren/channels.json
-            veloren/api-version.json
-            veloren/announcement.json
+            version.txt
+            channels.json
+            api-version.json
+            announcement.json
           generate_release_notes: true
           overwrite_files: true
