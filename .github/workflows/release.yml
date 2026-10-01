@@ -31,7 +31,9 @@ jobs:
         with:
           lfs: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-06-13
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -46,10 +48,6 @@ jobs:
 
       - name: Build voxygen
         run: cargo build --release -p veloren-voxygen
-
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2026-06-13
 
       - name: Build Airshipper
         working-directory: airshipper
@@ -68,7 +66,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd "$stage" && 7z a "../$stage.zip" *)
           else
-            (cd "$stage" && zip -r "../$stage.zip" .)
+            (cd "$stage" && zip -r "../$stage.zip" *)
           fi
           launcher_stage="../airshipper-${{ matrix.name }}"
           mkdir -p "$launcher_stage"
@@ -76,7 +74,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd "$launcher_stage" && 7z a "../airshipper-${{ matrix.name }}.zip" *)
           else
-            (cd "$launcher_stage" && zip -r "../airshipper-${{ matrix.name }}.zip" .)
+            (cd "$launcher_stage" && zip -r "../airshipper-${{ matrix.name }}.zip" *)
           fi
 
       - uses: actions/upload-artifact@v4
@@ -101,7 +99,7 @@ jobs:
 
       - name: Create launcher metadata
         run: |
-          printf '%s\n' "$GITHUB_REF_NAME" > version.txt
+          printf '%s' "$GITHUB_REF_NAME" > version.txt
           printf '["weekly"]\n' > channels.json
           printf '{"version":1}\n' > api-version.json
           printf '{"message":null,"last_change":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > announcement.json
