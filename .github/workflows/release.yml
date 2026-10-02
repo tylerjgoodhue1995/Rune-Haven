@@ -87,6 +87,16 @@ jobs:
           printf '{"version":1}\n' > api-version.json
           printf '{"message":null,"last_change":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > announcement.json
 
+      - name: Prepare release notes from changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            $0 ~ "^## \\[" version "\\]" { capture = 1; next }
+            capture && /^## \[/ && $0 !~ "^## \\[" version "\\]" { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -96,5 +106,6 @@ jobs:
             channels.json
             api-version.json
             announcement.json
-          generate_release_notes: true
+          body_path: veloren/release-notes.md
+          generate_release_notes: false
           overwrite_files: true
