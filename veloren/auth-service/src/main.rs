@@ -138,7 +138,7 @@ struct AlphaVerifyRequest {
 #[derive(Serialize)]
 struct AlphaVerifyResponse {
     access_granted: bool,
-    maintenance_mode: bool,
+    alpha_open: bool,
     is_admin: bool,
     admin_session: Option<String>,
     message: &'static str,
@@ -146,19 +146,18 @@ struct AlphaVerifyResponse {
 
 #[derive(Serialize)]
 struct AlphaStatusResponse {
-    maintenance_mode: bool,
-    allowlist_count: usize,
+    alpha_open: bool,
 }
 
 #[derive(Serialize)]
 struct AlphaAdminStateResponse {
-    maintenance_mode: bool,
+    alpha_open: bool,
     allowed_wallets: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct AlphaAdminUpdateRequest {
-    maintenance_mode: bool,
+    alpha_open: bool,
     allowed_wallets: Vec<String>,
 }
 
@@ -392,8 +391,7 @@ fn admin_session(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> 
 async fn alpha_status(State(state): State<AppState>) -> Json<AlphaStatusResponse> {
     let access = state.alpha_access.read().unwrap();
     Json(AlphaStatusResponse {
-        maintenance_mode: access.maintenance_mode,
-        allowlist_count: access.allowed_wallets.len(),
+        alpha_open: !access.maintenance_mode,
     })
 }
 
@@ -481,13 +479,13 @@ async fn alpha_verify(
 
     Ok(Json(AlphaVerifyResponse {
         access_granted,
-        maintenance_mode: access.maintenance_mode,
+        alpha_open: !access.maintenance_mode,
         is_admin,
         admin_session,
         message: if access_granted {
             "Wallet verified. Alpha access granted."
         } else {
-            "Alpha is in maintenance. This wallet is not on the access list."
+            "This wallet is not on the alpha access list."
         },
     }))
 }
@@ -502,7 +500,7 @@ async fn alpha_admin_state(
     let mut allowed_wallets = access.allowed_wallets.clone();
     allowed_wallets.sort();
     Ok(Json(AlphaAdminStateResponse {
-        maintenance_mode: access.maintenance_mode,
+        alpha_open: !access.maintenance_mode,
         allowed_wallets,
     }))
 }
@@ -533,7 +531,7 @@ async fn alpha_admin_update(
     let mut allowed_wallets = allowed_wallets.into_iter().collect::<Vec<_>>();
     allowed_wallets.sort();
     let updated = AlphaAccessState {
-        maintenance_mode: payload.maintenance_mode,
+        maintenance_mode: !payload.alpha_open,
         allowed_wallets,
     };
     persist_alpha_access(&state.alpha_access_path, &updated).map_err(|error| {
@@ -545,7 +543,7 @@ async fn alpha_admin_update(
     *state.alpha_access.write().unwrap() = updated.clone();
 
     Ok(Json(AlphaAdminStateResponse {
-        maintenance_mode: updated.maintenance_mode,
+        alpha_open: !updated.maintenance_mode,
         allowed_wallets: updated.allowed_wallets,
     }))
 }
