@@ -278,7 +278,7 @@ impl<'a> System<'a> for Sys {
                         let (
                             (pending_login, player, admin, player_list_update_msg, old_player),
                             mut new_players_guard,
-                        ) = match LoginProvider::login(
+                        ) = match read_data.login_provider.login(
                             pending,
                             client,
                             &editable_settings.admins,

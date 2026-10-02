@@ -11,7 +11,7 @@ use common_net::msg::RegisterError;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hashbrown::HashMap;
 use specs::Component;
-use std::{str::FromStr, sync::Arc};
+use std::{fs, path::PathBuf, str::FromStr, sync::Arc};
 use tokio::{runtime::Runtime, sync::oneshot};
 use tracing::{error, info};
 
@@ -108,6 +108,13 @@ impl Component for PendingLogin {
 pub struct LoginProvider {
     runtime: Arc<Runtime>,
     auth_server: Option<Arc<AuthClient>>,
+    alpha_access_path: Option<PathBuf>,
+}
+
+#[derive(serde::Deserialize)]
+struct AlphaAccessState {
+    maintenance_mode: bool,
+    allowed_wallets: Vec<String>,
 }
 
 impl LoginProvider {
@@ -130,6 +137,7 @@ impl LoginProvider {
         Self {
             runtime,
             auth_server,
+            alpha_access_path: std::env::var_os("VELOREN_ALPHA_ACCESS_PATH").map(PathBuf::from),
         }
     }
 
@@ -195,7 +203,32 @@ impl LoginProvider {
         Ok((wallet_username(wallet), derive_uuid(wallet)))
     }
 
+    fn check_alpha_access(&self, uuid: Uuid) -> Result<(), RegisterError> {
+        let Some(path) = &self.alpha_access_path else {
+            return Ok(());
+        };
+        let bytes = fs::read(path).map_err(|error| {
+            RegisterError::AuthError(format!("Alpha access configuration unavailable: {error}"))
+        })?;
+        let access: AlphaAccessState = serde_json::from_slice(&bytes).map_err(|error| {
+            RegisterError::AuthError(format!("Invalid alpha access configuration: {error}"))
+        })?;
+
+        if !access.maintenance_mode
+            || uuid == derive_uuid(ADMIN_WALLET)
+            || access
+                .allowed_wallets
+                .iter()
+                .any(|wallet| derive_uuid(wallet) == uuid)
+        {
+            Ok(())
+        } else {
+            Err(RegisterError::NotOnWhitelist)
+        }
+    }
+
     pub(crate) fn login<R>(
+        &self,
         pending: &mut PendingLogin,
         client: &Client,
         admins: &HashMap<Uuid, AdminRecord>,
@@ -217,6 +250,11 @@ impl LoginProvider {
                     .map(NormalizedIpAddr::from);
                 // Hardcoded admins can always log in.
                 let admin = admins.get(&uuid);
+                if admin.is_none()
+                    && let Err(error) = self.check_alpha_access(uuid)
+                {
+                    return Some(Err(error));
+                }
                 if let Some(ban) = banlist
                     .uuid_bans()
                     .get(&uuid)

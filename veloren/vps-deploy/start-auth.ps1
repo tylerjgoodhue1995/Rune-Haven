@@ -20,4 +20,5 @@ Get-Content .\auth.env | ForEach-Object {
         [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), "Process")
     }
 }
+$env:BETA_ALPHA_ACCESS_PATH = Join-Path $PSScriptRoot "alpha-access.json"
 & .\bin\veloren-beta-auth.exe

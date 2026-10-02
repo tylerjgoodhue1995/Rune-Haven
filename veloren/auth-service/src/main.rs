@@ -11,10 +11,11 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::random;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,6 +93,75 @@ struct PersistentState {
     admins: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct AlphaAccessState {
+    maintenance_mode: bool,
+    allowed_wallets: Vec<String>,
+}
+
+impl Default for AlphaAccessState {
+    fn default() -> Self {
+        Self {
+            maintenance_mode: true,
+            allowed_wallets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AlphaChallenge {
+    wallet: String,
+    message: String,
+    expires_at_unix_ms: u128,
+}
+
+#[derive(Deserialize)]
+struct AlphaChallengeRequest {
+    wallet: String,
+}
+
+#[derive(Serialize)]
+struct AlphaChallengeResponse {
+    nonce: String,
+    message: String,
+    expires_at_unix_ms: u128,
+}
+
+#[derive(Deserialize)]
+struct AlphaVerifyRequest {
+    wallet: String,
+    nonce: String,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct AlphaVerifyResponse {
+    access_granted: bool,
+    maintenance_mode: bool,
+    is_admin: bool,
+    admin_session: Option<String>,
+    message: &'static str,
+}
+
+#[derive(Serialize)]
+struct AlphaStatusResponse {
+    maintenance_mode: bool,
+    allowlist_count: usize,
+}
+
+#[derive(Serialize)]
+struct AlphaAdminStateResponse {
+    maintenance_mode: bool,
+    allowed_wallets: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AlphaAdminUpdateRequest {
+    maintenance_mode: bool,
+    allowed_wallets: Vec<String>,
+}
+
 #[derive(Clone)]
 struct AppState {
     users: Arc<RwLock<HashMap<String, String>>>,
@@ -102,6 +172,11 @@ struct AppState {
     rate_limiter: Arc<RateLimiter>,
     data_path: PathBuf,
     token_ttl: Duration,
+    alpha_access_path: PathBuf,
+    alpha_access: Arc<RwLock<AlphaAccessState>>,
+    alpha_admin_wallets: HashSet<String>,
+    alpha_challenges: Arc<RwLock<HashMap<String, AlphaChallenge>>>,
+    alpha_admin_sessions: Arc<RwLock<HashMap<String, u128>>>,
 }
 
 #[derive(Clone)]
@@ -164,6 +239,13 @@ impl AppError {
             message: message.into(),
         }
     }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -201,6 +283,42 @@ fn file_now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_millis()
+}
+
+fn default_alpha_access_path() -> PathBuf {
+    std::env::var_os("BETA_ALPHA_ACCESS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("alpha-access.json"))
+}
+
+fn alpha_admin_wallets() -> HashSet<String> {
+    std::env::var("BETA_ALPHA_ADMIN_WALLETS")
+        .unwrap_or_else(|_| "EiL5hGfzLAyCah2GMrxFz47HPLwgK6CQtS1CL1gWxQF8".to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|wallet| !wallet.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn load_alpha_access(path: &Path) -> AlphaAccessState {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn persist_alpha_access(path: &Path, access: &AlphaAccessState) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            AppError::bad_request(format!("Cannot create access data folder: {error}"))
+        })?;
+    }
+    let data = serde_json::to_vec_pretty(access).map_err(|error| {
+        AppError::bad_request(format!("Cannot serialize access state: {error}"))
+    })?;
+    fs::write(path, data)
+        .map_err(|error| AppError::bad_request(format!("Cannot save access state: {error}")))
 }
 
 fn persist_state(state: &AppState) {
@@ -243,8 +361,199 @@ fn sanitized_admins() -> HashSet<String> {
         .collect()
 }
 
+fn valid_wallet(wallet: &str) -> bool {
+    bs58::decode(wallet)
+        .into_vec()
+        .is_ok_and(|bytes| bytes.len() == 32)
+}
+
+fn admin_session(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| AppError::unauthorized("Admin wallet signature required."))?;
+
+    let now = file_now_ms();
+    let mut sessions = state.alpha_admin_sessions.write().unwrap();
+    sessions.retain(|_, expires_at| *expires_at > now);
+    if sessions
+        .get(token)
+        .is_some_and(|expires_at| *expires_at > now)
+    {
+        Ok(())
+    } else {
+        Err(AppError::unauthorized(
+            "Admin session expired. Reconnect wallet.",
+        ))
+    }
+}
+
+async fn alpha_status(State(state): State<AppState>) -> Json<AlphaStatusResponse> {
+    let access = state.alpha_access.read().unwrap();
+    Json(AlphaStatusResponse {
+        maintenance_mode: access.maintenance_mode,
+        allowlist_count: access.allowed_wallets.len(),
+    })
+}
+
+async fn alpha_challenge(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<AlphaChallengeResponse>, AppError> {
+    let payload: AlphaChallengeRequest = parse_json(body)?;
+    state.ensure_rate_limit()?;
+    if !valid_wallet(&payload.wallet) {
+        return Err(AppError::bad_request("Invalid Solana wallet address."));
+    }
+
+    let nonce = format!("{:032x}", random::<u128>());
+    let expires_at_unix_ms = file_now_ms() + Duration::from_secs(5 * 60).as_millis();
+    let message = format!(
+        "Rune Haven Alpha Access\nWallet: {}\nNonce: {}\nExpires: {}",
+        payload.wallet, nonce, expires_at_unix_ms
+    );
+    let challenge = AlphaChallenge {
+        wallet: payload.wallet,
+        message: message.clone(),
+        expires_at_unix_ms,
+    };
+    let mut challenges = state.alpha_challenges.write().unwrap();
+    challenges.retain(|_, challenge| challenge.expires_at_unix_ms > file_now_ms());
+    challenges.insert(nonce.clone(), challenge);
+
+    Ok(Json(AlphaChallengeResponse {
+        nonce,
+        message,
+        expires_at_unix_ms,
+    }))
+}
+
+async fn alpha_verify(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<AlphaVerifyResponse>, AppError> {
+    let payload: AlphaVerifyRequest = parse_json(body)?;
+    state.ensure_rate_limit()?;
+    let challenge = state
+        .alpha_challenges
+        .write()
+        .unwrap()
+        .remove(&payload.nonce)
+        .ok_or_else(|| AppError::unauthorized("Wallet challenge is missing or already used."))?;
+    if challenge.wallet != payload.wallet || challenge.expires_at_unix_ms <= file_now_ms() {
+        return Err(AppError::unauthorized(
+            "Wallet challenge expired or mismatched.",
+        ));
+    }
+
+    let public_key = bs58::decode(&payload.wallet)
+        .into_vec()
+        .map_err(|_| AppError::bad_request("Invalid Solana wallet address."))?;
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| AppError::bad_request("Invalid Solana wallet address."))?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| AppError::bad_request("Invalid Solana wallet address."))?;
+    let signature = bs58::decode(&payload.signature)
+        .into_vec()
+        .map_err(|_| AppError::unauthorized("Invalid wallet signature."))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| AppError::unauthorized("Invalid wallet signature."))?;
+    verifying_key
+        .verify_strict(challenge.message.as_bytes(), &signature)
+        .map_err(|_| AppError::unauthorized("Wallet signature rejected."))?;
+
+    let access = state.alpha_access.read().unwrap().clone();
+    let is_admin = state.alpha_admin_wallets.contains(&payload.wallet);
+    let access_granted =
+        !access.maintenance_mode || is_admin || access.allowed_wallets.contains(&payload.wallet);
+    let admin_session = if is_admin {
+        let token = format!("{:032x}", random::<u128>());
+        state.alpha_admin_sessions.write().unwrap().insert(
+            token.clone(),
+            file_now_ms() + Duration::from_secs(60 * 60).as_millis(),
+        );
+        Some(token)
+    } else {
+        None
+    };
+
+    Ok(Json(AlphaVerifyResponse {
+        access_granted,
+        maintenance_mode: access.maintenance_mode,
+        is_admin,
+        admin_session,
+        message: if access_granted {
+            "Wallet verified. Alpha access granted."
+        } else {
+            "Alpha is in maintenance. This wallet is not on the access list."
+        },
+    }))
+}
+
+async fn alpha_admin_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AlphaAdminStateResponse>, AppError> {
+    state.ensure_rate_limit()?;
+    admin_session(&headers, &state)?;
+    let access = state.alpha_access.read().unwrap();
+    let mut allowed_wallets = access.allowed_wallets.clone();
+    allowed_wallets.sort();
+    Ok(Json(AlphaAdminStateResponse {
+        maintenance_mode: access.maintenance_mode,
+        allowed_wallets,
+    }))
+}
+
+async fn alpha_admin_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<AlphaAdminStateResponse>, AppError> {
+    state.ensure_rate_limit()?;
+    admin_session(&headers, &state)?;
+    let payload: AlphaAdminUpdateRequest = parse_json(body)?;
+    if payload.allowed_wallets.len() > 5000 {
+        return Err(AppError::bad_request(
+            "The access list cannot exceed 5000 wallets.",
+        ));
+    }
+    let mut allowed_wallets = HashSet::new();
+    for wallet in payload.allowed_wallets {
+        let wallet = wallet.trim().to_owned();
+        if !valid_wallet(&wallet) {
+            return Err(AppError::bad_request(format!(
+                "Invalid Solana wallet: {wallet}"
+            )));
+        }
+        allowed_wallets.insert(wallet);
+    }
+    let mut allowed_wallets = allowed_wallets.into_iter().collect::<Vec<_>>();
+    allowed_wallets.sort();
+    let updated = AlphaAccessState {
+        maintenance_mode: payload.maintenance_mode,
+        allowed_wallets,
+    };
+    persist_alpha_access(&state.alpha_access_path, &updated).map_err(|error| {
+        AppError::internal(format!(
+            "Could not save alpha access state: {}",
+            error.message
+        ))
+    })?;
+    *state.alpha_access.write().unwrap() = updated.clone();
+
+    Ok(Json(AlphaAdminStateResponse {
+        maintenance_mode: updated.maintenance_mode,
+        allowed_wallets: updated.allowed_wallets,
+    }))
+}
+
 impl AppState {
     fn new(data_path: PathBuf, token_ttl: Duration) -> Self {
+        let alpha_access_path = default_alpha_access_path();
+        let alpha_access = load_alpha_access(&alpha_access_path);
         let persistent = load_persistent_state(&data_path);
         let PersistentState {
             users,
@@ -281,7 +590,18 @@ impl AppState {
             )),
             data_path,
             token_ttl,
+            alpha_access_path: alpha_access_path.clone(),
+            alpha_access: Arc::new(RwLock::new(alpha_access.clone())),
+            alpha_admin_wallets: alpha_admin_wallets(),
+            alpha_challenges: Arc::new(RwLock::new(HashMap::new())),
+            alpha_admin_sessions: Arc::new(RwLock::new(HashMap::new())),
         };
+
+        if !alpha_access_path.exists()
+            && let Err(error) = persist_alpha_access(&alpha_access_path, &alpha_access)
+        {
+            eprintln!("Could not create initial alpha access state: {error:?}");
+        }
 
         let admins = sanitized_admins();
         *state.admins.write().unwrap() = admins;
@@ -447,7 +767,7 @@ async fn verify_handler(
 
 #[tokio::main]
 async fn main() {
-    let bind = std::env::var("BETA_AUTH_BIND").unwrap_or_else(|_| "0.0.0.0:19253".to_string());
+    let bind = std::env::var("BETA_AUTH_BIND").unwrap_or_else(|_| "127.0.0.1:19253".to_string());
     let data_path = std::env::var("BETA_AUTH_DATA_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("auth-data/auth-state.json"));
@@ -461,6 +781,13 @@ async fn main() {
     let state = AppState::new(data_path.clone(), token_ttl);
 
     let app = Router::new()
+        .route("/api/alpha/status", get(alpha_status))
+        .route("/api/alpha/challenge", post(alpha_challenge))
+        .route("/api/alpha/verify", post(alpha_verify))
+        .route(
+            "/api/alpha/admin/state",
+            get(alpha_admin_state).put(alpha_admin_update),
+        )
         .route("/ping", get(ping))
         .route("/register", post(register_handler))
         .route("/generate_token", post(generate_token_handler))
