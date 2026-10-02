@@ -71,6 +71,25 @@ impl House {
             min: site.tile_wpos(tile_aabr.min),
             max: site.tile_wpos(tile_aabr.max),
         };
+        let ground_alt = aabr_tiles(tile_aabr)
+            .flat_map(|tile| {
+                let origin = site.tile_wpos(tile);
+                let edge = TILE_SIZE as i32 - 1;
+                [
+                    origin,
+                    origin + Vec2::new(edge, 0),
+                    origin + Vec2::new(0, edge),
+                    origin + Vec2::broadcast(edge),
+                    site.tile_center_wpos(tile),
+                ]
+            })
+            .map(|wpos| land.get_alt_approx(wpos).floor() as i32)
+            .min()
+            .unwrap_or_else(|| {
+                land.get_alt_approx(site.tile_center_wpos(door_tile))
+                    .floor() as i32
+            });
+        let alt = alt.map_or(ground_alt, |road_alt| road_alt.min(ground_alt));
 
         let front = match door_dir {
             dir if dir.y < 0 => Dir2::NegY,
@@ -122,9 +141,7 @@ impl House {
             door_tile,
             tile_aabr,
             bounds,
-            alt: alt.unwrap_or_else(|| {
-                land.get_alt_approx(site.tile_center_wpos(door_tile + door_dir)) as i32
-            }),
+            alt,
             levels,
             overhang: if levels > 3 {
                 // Overhangs of 3 at this building height are ill-advised.

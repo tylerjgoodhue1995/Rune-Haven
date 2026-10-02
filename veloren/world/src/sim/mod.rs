@@ -2043,17 +2043,18 @@ impl WorldSim {
             |pos| sample_pos(&map_config, self, index, Some(&samples_data), pos),
             |pos| sample_wpos(&map_config, self, pos),
             |pos, (r, g, b, _a)| {
-                // We currently ignore alpha and replace it with the height at pos, scaled to
-                // u8.
                 let alt = sample_wpos(
                     &map_config,
                     self,
                     pos.map(|e| e as i32) * TerrainChunkSize::RECT_SIZE.map(|e| e as i32),
                 );
-                let a = 0; //(alt.min(1.0).max(0.0) * 255.0) as u8;
-
-                // NOTE: Safe by invariants on map_size_lg.
                 let posi = (pos.y << self.map_size_lg().vec().x) | pos.x;
+                let is_water = r == 0
+                    && samples_data[posi].as_ref().is_some_and(|sample| {
+                        sample.water_level > sample.alt && sample.ice_depth <= 0.0
+                    });
+                let a = if is_water { 255 } else { 0 };
+
                 v[posi] = u32::from_le_bytes([r, g, b, a]);
                 alts[posi] = (((alt.clamp(0.0, 1.0) * 8191.0) as u32) & 0x1FFF) << 3;
             },

@@ -218,6 +218,11 @@ vec3 lod_col(vec2 pos) {
 
     return col;
 }
+
+float lod_water_at(vec2 pos) {
+    vec2 tex_size = vec2(textureSize(sampler2D(t_map, s_map), 0));
+    return texture(sampler2D(t_map, s_map), pos_to_tex(pos) / tex_size).a;
+}
 #endif
 
 vec3 water_diffuse(vec3 color, vec3 dir, float max_dist) {

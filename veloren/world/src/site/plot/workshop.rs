@@ -24,7 +24,7 @@ impl Workshop {
         _rng: &mut impl Rng,
         site: &Site,
         door_tile: Vec2<i32>,
-        door_dir: Vec2<i32>,
+        _door_dir: Vec2<i32>,
         tile_aabr: Aabr<i32>,
         alt: Option<i32>,
     ) -> Self {
@@ -32,13 +32,27 @@ impl Workshop {
             min: site.tile_wpos(tile_aabr.min),
             max: site.tile_wpos(tile_aabr.max),
         };
+        let ground_alt = aabr_tiles(tile_aabr)
+            .flat_map(|tile| {
+                let origin = site.tile_wpos(tile);
+                let edge = TILE_SIZE as i32 - 1;
+                [
+                    origin,
+                    origin + Vec2::new(edge, 0),
+                    origin + Vec2::new(0, edge),
+                    origin + Vec2::broadcast(edge),
+                    site.tile_center_wpos(tile),
+                ]
+            })
+            .map(|wpos| land.get_alt_approx(wpos).floor() as i32)
+            .min()
+            .unwrap_or_else(|| {
+                land.get_alt_approx(site.tile_center_wpos(door_tile))
+                    .floor() as i32
+            });
+        let alt = alt.map_or(ground_alt, |road_alt| road_alt.min(ground_alt));
 
-        Self {
-            bounds,
-            alt: alt.unwrap_or_else(|| {
-                land.get_alt_approx(site.tile_center_wpos(door_tile + door_dir)) as i32
-            }),
-        }
+        Self { bounds, alt }
     }
 }
 
