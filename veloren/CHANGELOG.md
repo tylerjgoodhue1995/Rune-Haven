@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-10-07
+
+### Added
+
+- Wallet-based alpha access gate, checked on every login.
+- Character species other than Human now require a character NFT in the player's linked wallet.
+
+### Changed
+
+- The alpha status endpoint no longer exposes the approved wallet list.
+
 ## [0.18.2] - 2026-09-30
 
 ### Added
@@ -20,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Airship captains can now be asked where they're currently heading, and where they're heading after reaching the current destination.
 - Courier, fetch, and messenger quests that can be started by talking to various civilized NPC's that can afford to pay you to get the job done.
 - Internationalization feature for singleplayer MOTDs
-- Added bullet character (•) to EnterCommand font
+- Added bullet character (â€¢) to EnterCommand font
 - Checks to prevent players from being teleported in the ground
 - Checks on certain server commands to prevent players from being teleported into the ground
 - Hunters now function as traders and sell weapons
@@ -491,7 +502,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - NPCs wont pick up recently dropped items (if not hostile towards you).
 - Fixed "low fps" of different shaders caused by low floating point precision when using time.
 - Fixed bug where airship captains would mass generate after using `/reload_chunks`.
-- Fixed French translation "Énergie Consommée" -> "Regain d'Énergie".
+- Fixed French translation "Ã‰nergie ConsommÃ©e" -> "Regain d'Ã‰nergie".
 - Fixed Perforate icon not displaying.
 - Make cave entrances easier to follow.
 - Renamed Twiggy Shoulders to match the Twig Armor set.
@@ -886,7 +897,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HUD debug info now displays current biome and site.
 - Quotes and escape codes can be used in command arguments.
 - Toggle chat with a shortcut (default is F5).
-- Pets are now saved on logout 🐕 🦎 🐼.
+- Pets are now saved on logout ðŸ• ðŸ¦Ž ðŸ¼.
 - Dual-wielded, one-handed swords as starting weapons (will be replaced by daggers in the future!).
 - Healing sceptre crafting recipe.
 - NPCs can now warn players before engaging in combat.
@@ -1175,7 +1186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adjusted Stonework Defender loot table to remove mindflayer drops (bag, staff, glider).
 - Made humanoid NPCs use gliders (if equipped) when falling.
 - Changed default controller key bindings.
-- Improved network efficiency by ≈ factor 10 by using `tokio`.
+- Improved network efficiency by â‰ˆ factor 10 by using `tokio`.
 - Added item tooltips to trade window.
 - "Quest" given to new players converted to being a short tutorial.
 - Items can be requested from the counterparty's inventory during trade.
@@ -1350,7 +1361,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added faction chat `/join_faction` `/faction`.
 - Added regional, local, and global chat (`/region`, `/say`, and `/world`, respectively).
 - Added command shortcuts for each of the above chat modes (`/g`, `/f`, `/r`, `/s`, and `/w`, respectively and `/t` for `/tell`).
-- Ability to wield 2 × 1h weapons and shields (Note: 1h weapons & shields are not currently available, see [!1095](https://gitlab.com/veloren/veloren/-/merge_requests/1095) for more info).
+- Ability to wield 2 Ã— 1h weapons and shields (Note: 1h weapons & shields are not currently available, see [!1095](https://gitlab.com/veloren/veloren/-/merge_requests/1095) for more info).
 - Zoomable Map.
 - M2 attack for hammer.
 - Spawnable training dummies.
