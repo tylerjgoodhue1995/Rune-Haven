@@ -11,6 +11,8 @@ use crate::{
     character_creator,
     client::Client,
     persistence::{character_loader::CharacterLoader, character_updater::CharacterUpdater},
+    property::PropertyRuntime,
+    species_gate,
 };
 #[cfg(feature = "worldgen")]
 use common::terrain::TerrainChunkSize;
@@ -186,6 +188,16 @@ impl Sys {
                         alias
                     )))?;
                 } else if let Some(player) = data.players.get(entity) {
+                    if let Err(reason) = species_gate::check(
+                        data.property_runtime
+                            .account(&player.uuid().to_string())
+                            .as_ref()
+                            .map(|account| account.wallet.as_str()),
+                        &body,
+                    ) {
+                        client.send(ServerGeneral::CharacterActionError(reason))?;
+                        return Ok(());
+                    }
                     #[cfg(feature = "worldgen")]
                     let waypoint = start_site.and_then(|site_idx| {
                         // Don't allow starting here if it's not a possible starting site.
@@ -267,6 +279,16 @@ impl Sys {
                         alias
                     )))?;
                 } else if let Some(player) = data.players.get(entity)
+                    && let Err(reason) = species_gate::check(
+                        data.property_runtime
+                            .account(&player.uuid().to_string())
+                            .as_ref()
+                            .map(|account| account.wallet.as_str()),
+                        &body,
+                    )
+                {
+                    client.send(ServerGeneral::CharacterActionError(reason))?;
+                } else if let Some(player) = data.players.get(entity)
                     && let Err(error) = character_creator::edit_character(
                         entity,
                         player.uuid().to_string(),
@@ -325,6 +347,7 @@ pub struct ReadData<'a> {
     automod: ReadExpect<'a, AutoMod>,
     time: ReadExpect<'a, Time>,
     world: ReadExpect<'a, Arc<World>>,
+    property_runtime: ReadExpect<'a, PropertyRuntime>,
 
     #[cfg(feature = "worldgen")]
     index: ReadExpect<'a, IndexOwned>,

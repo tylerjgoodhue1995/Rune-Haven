@@ -28,6 +28,7 @@ pub mod presence;
 pub mod property;
 pub mod rtsim;
 pub mod settings;
+pub mod species_gate;
 pub mod state_ext;
 pub mod sys;
 pub mod terrain_persistence;

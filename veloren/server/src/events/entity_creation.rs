@@ -77,6 +77,21 @@ pub fn handle_initialize_spectator(server: &mut Server, ev: InitializeSpectatorE
 }
 
 pub fn handle_loaded_character_data(server: &mut Server, ev: UpdateCharacterDataEvent) {
+    let wallet = {
+        let ecs = server.state.ecs();
+        ecs.read_storage::<comp::Player>()
+            .get(ev.entity)
+            .and_then(|player| {
+                ecs.read_resource::<crate::property::PropertyRuntime>()
+                    .account(&player.uuid().to_string())
+            })
+            .map(|account| account.wallet)
+    };
+    if let Err(reason) = crate::species_gate::check(wallet.as_deref(), &ev.components.0) {
+        handle_exit_ingame(server, ev.entity, false);
+        server.notify_client(ev.entity, ServerGeneral::CharacterDataLoadResult(Err(reason)));
+        return;
+    }
     let loaded_components = PersistedComponents {
         body: ev.components.0,
         hardcore: ev.components.1,
