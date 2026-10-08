@@ -82,7 +82,7 @@ pub fn handle_loaded_character_data(server: &mut Server, ev: UpdateCharacterData
         ecs.read_storage::<comp::Player>()
             .get(ev.entity)
             .and_then(|player| {
-                ecs.read_resource::<crate::property::PropertyRuntime>()
+                ecs.read_resource::<crate::property::ActivePropertyRuntime>()
                     .account(&player.uuid().to_string())
             })
             .map(|account| account.wallet)
