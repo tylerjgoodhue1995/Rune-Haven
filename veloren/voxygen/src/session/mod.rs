@@ -218,6 +218,9 @@ impl SessionState {
     }
 
     fn draw_property_parcel_outline(&mut self, parcel: &common_net::msg::PropertyParcelInfo) {
+        if !parcel.is_owned {
+            return;
+        }
         if !self.property_parcel_outlines.insert(parcel.id.clone()) {
             return;
         }
@@ -634,6 +637,7 @@ impl SessionState {
                 },
                 client::Event::PropertyParcels(parcels) => {
                     self.pending_property_parcels = parcels.clone();
+                    self.hud.set_owned_property_map_markers(&parcels);
                     for parcel in &parcels {
                         for placement in &parcel.placed_positions {
                             let key = (parcel.id.clone(), placement.x, placement.y);
@@ -718,7 +722,9 @@ impl SessionState {
         let pending = self.pending_property_parcels.clone();
         self.pending_property_parcels.clear();
         for parcel in &pending {
-            self.draw_property_parcel_outline(parcel);
+            if parcel.is_owned {
+                self.draw_property_parcel_outline(parcel);
+            }
         }
 
         Ok(TickAction::Continue)
@@ -2294,11 +2300,13 @@ impl PlayState for SessionState {
                     HudEvent::RequestPropertyParcels => {
                         self.client.borrow_mut().request_property_parcels();
                     },
-                    HudEvent::BeginPropertyPlacement { parcel_id, land_nft_id } => {
-                        self.hud.begin_property_placement(&parcel_id, &land_nft_id);
-                        self.hud.new_message(ChatType::Meta.into_plain_msg(
-                            "Paste your building NFT mint, aim at a spot inside the parcel, and press Enter.",
-                        ));
+                    HudEvent::PlaceSelectedBuilding { parcel_id, land_nft_id, building_nft_id, x, y } => {
+                        self.client.borrow_mut().request_property_placement(
+                            parcel_id,
+                            land_nft_id,
+                            building_nft_id,
+                            Vec2::new(x, y),
+                        );
                     },
                     HudEvent::DepositVgld => {
                         let mint = std::env::var("VELOREN_VGLD_MINT")

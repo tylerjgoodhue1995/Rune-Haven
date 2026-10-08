@@ -131,7 +131,7 @@ use common_net::{msg::world_msg::SiteId, sync::WorldSyncExt};
 use conrod_core::{
     Color, Colorable, Labelable, Positionable, Sizeable, Widget,
     text::cursor::Index,
-    widget::{self, Button, Image, Rectangle, Text},
+    widget::{self, Button, Image, Rectangle, Text, TextEdit},
     widget_ids,
 };
 use hashbrown::{HashMap, HashSet};
@@ -335,6 +335,19 @@ widget_ids! {
         property_details_bg,
         property_purchase,
         property_place,
+        property_building_nft,
+        property_building_label,
+        property_plot_label,
+        property_spot_label,
+        property_plot_0,
+        property_plot_1,
+        property_plot_2,
+        property_plot_3,
+        property_plot_4,
+        property_plot_5,
+        property_plot_6,
+        property_plot_7,
+        property_plot_8,
         property_status,
         property_details,
         property_row_0,
@@ -763,7 +776,13 @@ pub enum Event {
     RequestSiteInfo(SiteId),
     RequestPropertyParcels,
     PurchaseSelectedProperty,
-    BeginPropertyPlacement { parcel_id: String, land_nft_id: String },
+    PlaceSelectedBuilding {
+        parcel_id: String,
+        land_nft_id: String,
+        building_nft_id: String,
+        x: i32,
+        y: i32,
+    },
     DepositVgld,
     ChangeAbility(usize, AuxiliaryAbility),
 
@@ -1390,9 +1409,12 @@ pub struct Hud {
     clear_chat: bool,
     current_dialogue: Option<(EcsEntity, Instant, rtsim::Dialogue<true>)>,
     extra_markers: Vec<map::ExtraMarker>,
+    property_map_markers: HashSet<String>,
     property_parcels: Vec<common_net::msg::PropertyParcelInfo>,
     property_panel_open: bool,
     property_selected: Option<usize>,
+    property_building_mint: String,
+    property_spot: Option<Vec2<i32>>,
     property_page: usize,
     property_filter_index: usize,
     property_sort_high_to_low: bool,
@@ -1507,9 +1529,12 @@ impl Hud {
             clear_chat: false,
             current_dialogue: None,
             extra_markers: Vec::new(),
+            property_map_markers: HashSet::new(),
             property_parcels: Vec::new(),
             property_panel_open: false,
             property_selected: None,
+            property_building_mint: String::new(),
+            property_spot: None,
             property_page: 0,
             property_filter_index: 0,
             property_sort_high_to_low: false,
@@ -1675,6 +1700,7 @@ impl Hud {
                 self.property_filter_index = (self.property_filter_index + 1) % filters.len();
                 self.property_page = 0;
                 self.property_selected = None;
+                self.property_spot = None;
             }
             if Button::new()
                 .w_h(180.0, 28.0)
@@ -1690,6 +1716,8 @@ impl Hud {
                 .was_clicked()
             {
                 self.property_sort_high_to_low = !self.property_sort_high_to_low;
+                self.property_selected = None;
+                self.property_spot = None;
             }
 
             for (row_index, parcel_index) in page_indices.into_iter().enumerate() {
@@ -1739,6 +1767,7 @@ impl Hud {
                     .was_clicked()
                 {
                     self.property_selected = Some(parcel_index);
+                    self.property_spot = None;
                 }
             }
 
@@ -1752,6 +1781,7 @@ impl Hud {
             {
                 self.property_page = self.property_page.saturating_sub(1);
                 self.property_selected = None;
+                self.property_spot = None;
             }
             if Button::new()
                 .w_h(34.0, 28.0)
@@ -1764,6 +1794,7 @@ impl Hud {
                 if self.property_page + 1 < page_count {
                     self.property_page += 1;
                     self.property_selected = None;
+                    self.property_spot = None;
                 }
             }
 
@@ -1839,13 +1870,102 @@ impl Hud {
                     parcel.allowed_buildings.join(", "),
                     placed_locations
                 );
-                Text::new(&details)
+                if parcel.is_owned {
+                    Text::new(&format!(
+                        "OWNED DEED\n{} · {}\n{} x {} plot · {} buildings available\nAllowed: {}",
+                        parcel.region,
+                        parcel.land_type,
+                        width,
+                        height,
+                        available_slots,
+                        parcel.allowed_buildings.join(", "),
+                    ))
                     .top_left_with_margins_on(self.ids.property_panel, 122.0, 380.0)
                     .w(340.0)
                     .font_id(self.fonts.cyri.conrod_id)
-                    .font_size(self.fonts.cyri.scale(15))
+                    .font_size(self.fonts.cyri.scale(14))
                     .color(TEXT_COLOR)
                     .set(self.ids.property_details, ui_widgets);
+
+                    Text::new("Building NFT mint")
+                        .top_left_with_margins_on(self.ids.property_panel, 196.0, 380.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(13))
+                        .color(TEXT_COLOR_GREY)
+                        .set(self.ids.property_building_label, ui_widgets);
+                    if let Some(value) = TextEdit::new(&self.property_building_mint)
+                        .top_left_with_margins_on(self.ids.property_panel, 216.0, 380.0)
+                        .w_h(342.0, 32.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(14))
+                        .color(TEXT_COLOR)
+                        .set(self.ids.property_building_nft, ui_widgets)
+                        && value != self.property_building_mint
+                    {
+                        self.property_building_mint = value.trim().to_owned();
+                    }
+
+                    Text::new("Choose a position inside this deed")
+                        .top_left_with_margins_on(self.ids.property_panel, 260.0, 380.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(13))
+                        .color(TEXT_COLOR_GREY)
+                        .set(self.ids.property_plot_label, ui_widgets);
+
+                    for row in 0..3 {
+                        for col in 0..3 {
+                            let spot = Vec2::new(
+                                parcel.min_x + width * (2 * col + 1) / 6,
+                                parcel.min_y + height * (2 * row + 1) / 6,
+                            );
+                            let cell_id = match row * 3 + col {
+                                0 => self.ids.property_plot_0,
+                                1 => self.ids.property_plot_1,
+                                2 => self.ids.property_plot_2,
+                                3 => self.ids.property_plot_3,
+                                4 => self.ids.property_plot_4,
+                                5 => self.ids.property_plot_5,
+                                6 => self.ids.property_plot_6,
+                                7 => self.ids.property_plot_7,
+                                _ => self.ids.property_plot_8,
+                            };
+                            let selected_spot = self.property_spot == Some(spot);
+                            if Button::new()
+                                .top_left_with_margins_on(
+                                    self.ids.property_panel,
+                                    284.0 + row as f64 * 42.0,
+                                    400.0 + col as f64 * 70.0,
+                                )
+                                .w_h(64.0, 36.0)
+                                .label(&format!("{}, {}", spot.x, spot.y))
+                                .color(if selected_spot { UI_MAIN } else { Color::Rgba(0.08, 0.10, 0.12, 1.0) })
+                                .label_color(if selected_spot { BLACK } else { TEXT_COLOR })
+                                .label_font_id(self.fonts.cyri.conrod_id)
+                                .label_font_size(self.fonts.cyri.scale(11))
+                                .set(cell_id, ui_widgets)
+                                .was_clicked()
+                            {
+                                self.property_spot = Some(spot);
+                            }
+                        }
+                    }
+                    if let Some(spot) = self.property_spot {
+                        Text::new(&format!("Selected plot position: {}, {}", spot.x, spot.y))
+                            .bottom_left_with_margins_on(self.ids.property_panel, 54.0, 220.0)
+                            .font_id(self.fonts.cyri.conrod_id)
+                            .font_size(self.fonts.cyri.scale(12))
+                            .color(TEXT_COLOR_GREY)
+                            .set(self.ids.property_spot_label, ui_widgets);
+                    }
+                } else {
+                    Text::new(&details)
+                        .top_left_with_margins_on(self.ids.property_panel, 122.0, 380.0)
+                        .w(340.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(15))
+                        .color(TEXT_COLOR)
+                        .set(self.ids.property_details, ui_widgets);
+                }
 
                 if let Some(status) = &self.property_status {
                     Text::new(status)
@@ -1857,29 +1977,29 @@ impl Hud {
                         .set(self.ids.property_status, ui_widgets);
                 }
 
-                if parcel.is_owned
-                    && parcel.placed_buildings < parcel.max_buildings
-                    && Button::new()
-                    .w_h(190.0, 38.0)
-                    .bottom_left_with_margins_on(self.ids.property_panel, 16.0, 16.0)
-                    .label("Place NFT Building")
-                    .label_font_id(self.fonts.cyri.conrod_id)
-                    .label_font_size(self.fonts.cyri.scale(15))
-                    .label_color(TEXT_COLOR)
-                    .set(self.ids.property_place, ui_widgets)
-                    .was_clicked()
-                {
-                    events.push(Event::BeginPropertyPlacement {
-                        parcel_id: parcel.id.clone(),
-                        land_nft_id: parcel.land_nft_id.clone(),
-                    });
-                } else if parcel.is_owned {
-                    Text::new("Parcel is at building capacity")
-                        .bottom_left_with_margins_on(self.ids.property_panel, 26.0, 22.0)
-                        .font_id(self.fonts.cyri.conrod_id)
-                        .font_size(self.fonts.cyri.scale(13))
-                        .color(TEXT_COLOR_GREY)
-                        .set(self.ids.property_status, ui_widgets);
+                if parcel.is_owned {
+                    if parcel.placed_buildings < parcel.max_buildings
+                        && self.property_spot.is_some()
+                        && !self.property_building_mint.is_empty()
+                        && Button::new()
+                            .w_h(190.0, 38.0)
+                            .bottom_left_with_margins_on(self.ids.property_panel, 16.0, 16.0)
+                            .label("Place building")
+                            .label_font_id(self.fonts.cyri.conrod_id)
+                            .label_font_size(self.fonts.cyri.scale(15))
+                            .label_color(TEXT_COLOR)
+                            .set(self.ids.property_place, ui_widgets)
+                            .was_clicked()
+                    {
+                        let spot = self.property_spot.expect("placement spot selected");
+                        events.push(Event::PlaceSelectedBuilding {
+                            parcel_id: parcel.id.clone(),
+                            land_nft_id: parcel.land_nft_id.clone(),
+                            building_nft_id: self.property_building_mint.clone(),
+                            x: spot.x,
+                            y: spot.y,
+                        });
+                    }
                 } else if !parcel.is_owned
                     && Button::new()
                         .w_h(190.0, 38.0)
@@ -5192,9 +5312,35 @@ impl Hud {
         self.property_filter_index = 0;
         self.property_sort_high_to_low = false;
         self.property_selected = (!self.property_parcels.is_empty()).then_some(0);
+        self.property_spot = None;
         self.property_panel_open = true;
         self.property_status = None;
         self.show.want_grab = false;
+    }
+
+    pub fn set_owned_property_map_markers(&mut self, parcels: &[common_net::msg::PropertyParcelInfo]) {
+        let previous: Vec<_> = self
+            .property_map_markers
+            .drain()
+            .map(|parcel_id| {
+                common::map::Marker::at(Vec2::zero()).with_id(format!("owned-land:{parcel_id}"))
+            })
+            .collect();
+        self.extra_markers
+            .retain(|entry| !previous.iter().any(|marker| entry.marker.is_same(marker)));
+
+        for parcel in parcels.iter().filter(|parcel| parcel.is_owned) {
+            let marker_id = format!("owned-land:{}", parcel.id);
+            let center = Vec2::new(
+                (parcel.min_x + parcel.max_x) as f32 / 2.0,
+                (parcel.min_y + parcel.max_y) as f32 / 2.0,
+            );
+            let marker = common::map::Marker::at(center)
+                .with_id(marker_id.clone())
+                .with_label(Content::Plain(format!("Owned land: {} - {}", parcel.land_type, parcel.region)));
+            self.extra_markers.push(map::ExtraMarker { recv_pos: center, marker });
+            self.property_map_markers.insert(parcel.id.clone());
+        }
     }
 
     pub fn set_property_purchase_status(&mut self, message: String) {
@@ -5209,15 +5355,6 @@ impl Hud {
         self.force_chat_input = Some("/vgld_deposit ".to_owned());
         self.force_chat_cursor = Some(Index { line: 0, char: 14 });
         self.force_chat = true;
-        self.ui.focus_widget(Some(self.ids.chat));
-    }
-
-    pub fn begin_property_placement(&mut self, parcel_id: &str, land_nft_id: &str) {
-        let input = format!("/property_place {parcel_id} {land_nft_id} ");
-        self.force_chat_cursor = Some(Index { line: 0, char: input.chars().count() });
-        self.force_chat_input = Some(input);
-        self.force_chat = true;
-        self.property_panel_open = false;
         self.ui.focus_widget(Some(self.ids.chat));
     }
 
