@@ -46,6 +46,7 @@ impl Sys {
         match msg {
             ClientGeneral::RequestPropertyParcels => {
                 property_runtime.reload_parcels();
+                property_runtime.reload_buildings();
                 let parcels = player
                     .map(|player| {
                         property_runtime.parcel_infos_for_player(&player.uuid().to_string())

@@ -2294,6 +2294,12 @@ impl PlayState for SessionState {
                     HudEvent::RequestPropertyParcels => {
                         self.client.borrow_mut().request_property_parcels();
                     },
+                    HudEvent::BeginPropertyPlacement { parcel_id, land_nft_id } => {
+                        self.hud.begin_property_placement(&parcel_id, &land_nft_id);
+                        self.hud.new_message(ChatType::Meta.into_plain_msg(
+                            "Paste your building NFT mint, aim at a spot inside the parcel, and press Enter.",
+                        ));
+                    },
                     HudEvent::DepositVgld => {
                         let mint = std::env::var("VELOREN_VGLD_MINT")
                             .or_else(|_| std::env::var("VGLD_MINT_ADDRESS"));

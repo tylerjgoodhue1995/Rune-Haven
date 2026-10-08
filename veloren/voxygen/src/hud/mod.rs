@@ -334,6 +334,7 @@ widget_ids! {
         property_header,
         property_details_bg,
         property_purchase,
+        property_place,
         property_status,
         property_details,
         property_row_0,
@@ -762,6 +763,7 @@ pub enum Event {
     RequestSiteInfo(SiteId),
     RequestPropertyParcels,
     PurchaseSelectedProperty,
+    BeginPropertyPlacement { parcel_id: String, land_nft_id: String },
     DepositVgld,
     ChangeAbility(usize, AuxiliaryAbility),
 
@@ -1855,21 +1857,39 @@ impl Hud {
                         .set(self.ids.property_status, ui_widgets);
                 }
 
-                let action_label = if parcel.is_owned {
-                    "Property Management"
-                } else {
-                    "Request Purchase"
-                };
-                if Button::new()
+                if parcel.is_owned
+                    && parcel.placed_buildings < parcel.max_buildings
+                    && Button::new()
                     .w_h(190.0, 38.0)
                     .bottom_left_with_margins_on(self.ids.property_panel, 16.0, 16.0)
-                    .label(action_label)
+                    .label("Place NFT Building")
                     .label_font_id(self.fonts.cyri.conrod_id)
                     .label_font_size(self.fonts.cyri.scale(15))
-                    .label_color(if parcel.is_owned { TEXT_COLOR } else { BLACK })
-                    .set(self.ids.property_purchase, ui_widgets)
+                    .label_color(TEXT_COLOR)
+                    .set(self.ids.property_place, ui_widgets)
                     .was_clicked()
-                    && !parcel.is_owned
+                {
+                    events.push(Event::BeginPropertyPlacement {
+                        parcel_id: parcel.id.clone(),
+                        land_nft_id: parcel.land_nft_id.clone(),
+                    });
+                } else if parcel.is_owned {
+                    Text::new("Parcel is at building capacity")
+                        .bottom_left_with_margins_on(self.ids.property_panel, 26.0, 22.0)
+                        .font_id(self.fonts.cyri.conrod_id)
+                        .font_size(self.fonts.cyri.scale(13))
+                        .color(TEXT_COLOR_GREY)
+                        .set(self.ids.property_status, ui_widgets);
+                } else if !parcel.is_owned
+                    && Button::new()
+                        .w_h(190.0, 38.0)
+                        .bottom_left_with_margins_on(self.ids.property_panel, 16.0, 16.0)
+                        .label("Request Purchase")
+                        .label_font_id(self.fonts.cyri.conrod_id)
+                        .label_font_size(self.fonts.cyri.scale(15))
+                        .label_color(BLACK)
+                        .set(self.ids.property_purchase, ui_widgets)
+                        .was_clicked()
                 {
                     events.push(Event::PurchaseSelectedProperty);
                 }
@@ -5189,6 +5209,15 @@ impl Hud {
         self.force_chat_input = Some("/vgld_deposit ".to_owned());
         self.force_chat_cursor = Some(Index { line: 0, char: 14 });
         self.force_chat = true;
+        self.ui.focus_widget(Some(self.ids.chat));
+    }
+
+    pub fn begin_property_placement(&mut self, parcel_id: &str, land_nft_id: &str) {
+        let input = format!("/property_place {parcel_id} {land_nft_id} ");
+        self.force_chat_cursor = Some(Index { line: 0, char: input.chars().count() });
+        self.force_chat_input = Some(input);
+        self.force_chat = true;
+        self.property_panel_open = false;
         self.ui.focus_widget(Some(self.ids.chat));
     }
 

@@ -301,6 +301,7 @@ pub struct PropertyParcelInfo {
     pub max_buildings: u32,
     pub placed_buildings: u32,
     pub placed_positions: Vec<PropertyPlacementLocation>,
+    pub land_nft_id: String,
 }
 
 impl ServerGeneral {

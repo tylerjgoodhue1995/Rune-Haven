@@ -42,6 +42,12 @@ pub struct PropertyParcel {
     pub max_buildings: usize,
 }
 
+#[derive(serde::Deserialize)]
+struct BuildingRegistryEntry {
+    mint: String,
+    building_type: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BuildingFootprint {
     pub width: i32,
@@ -122,6 +128,8 @@ pub struct PlacedBuilding {
     pub y: i32,
     pub building_type: String,
     pub footprint: BuildingFootprint,
+    #[serde(default)]
+    pub building_nft_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +156,7 @@ pub enum PropertyError {
     BuildingTypeNotAllowed,
     BuildingPlacementOutOfBounds,
     BuildingPlacementConflict,
+    BuildingAlreadyPlaced,
     ParcelFull,
     PurchaseReserved,
     UnknownAsset,
@@ -177,6 +186,7 @@ impl std::fmt::Display for PropertyError {
                     "building footprint overlaps another building or required clearance"
                 )
             },
+            Self::BuildingAlreadyPlaced => write!(f, "this building NFT is already placed"),
             Self::ParcelFull => write!(f, "this parcel is full"),
             Self::PurchaseReserved => write!(f, "this parcel is reserved for another purchase"),
             Self::UnknownAsset => write!(f, "asset metadata is missing or invalid"),
@@ -305,6 +315,18 @@ impl SolanaBlockchainProvider {
             .or_default()
             .insert(nft_id.clone());
         self.building_metadata.insert(nft_id, metadata);
+    }
+
+    fn register_building_definition(&mut self, nft_id: String, building_type: String) {
+        self.building_metadata.insert(nft_id.clone(), NftMetadata {
+            token_id: nft_id,
+            collection: self.config.building_collection.clone(),
+            asset_type: "building".to_string(),
+            land_type: None,
+            building_type: Some(building_type),
+            world_id: None,
+            metadata_uri: String::new(),
+        });
     }
 
     fn wallet_owns_nft(&self, wallet: &str, nft_id: &str) -> bool {
@@ -844,7 +866,25 @@ impl PropertyRuntime<SolanaBlockchainProvider> {
             .service
             .load_or_generate_parcels(path.with_file_name("property_parcels.json"));
         runtime.service.load_placements();
+        runtime.reload_buildings();
         runtime
+    }
+
+    pub fn reload_buildings(&mut self) {
+        let Some(path) = self.service.persistence_path.as_deref().map(|path| path.with_file_name("property_buildings.json")) else {
+            return;
+        };
+        let Ok(bytes) = fs::read(&path) else { return };
+        let Ok(entries) = serde_json::from_slice::<Vec<BuildingRegistryEntry>>(&bytes) else {
+            tracing::warn!(?path, "Ignoring invalid property building registry");
+            return;
+        };
+        let Some(provider) = Arc::get_mut(&mut self.service.provider) else { return };
+        for entry in entries {
+            if valid_building_type(&entry.building_type) && valid_solana_address(&entry.mint) {
+                provider.register_building_definition(entry.mint, entry.building_type);
+            }
+        }
     }
 }
 
@@ -853,6 +893,17 @@ impl Default for PropertyRuntime<SolanaBlockchainProvider> {
 }
 
 pub type ActivePropertyRuntime = PropertyRuntime<SolanaBlockchainProvider>;
+
+fn valid_building_type(building_type: &str) -> bool {
+    matches!(
+        building_type,
+        "house" | "shop" | "inn" | "blacksmith" | "guild_hall" | "farmhouse" | "barn" | "stable" | "castle" | "fortress" | "town_hall"
+    )
+}
+
+fn valid_solana_address(address: &str) -> bool {
+    bs58::decode(address).into_vec().is_ok_and(|bytes| bytes.len() == 32)
+}
 
 impl<P: BlockchainProvider> PropertyRuntime<P> {
     pub fn reload_parcels(&mut self) {
@@ -1001,6 +1052,7 @@ impl<P: BlockchainProvider> PropertyService<P> {
                     .collect();
                 common_net::msg::PropertyParcelInfo {
                     id: parcel.id.clone(),
+                    land_nft_id: parcel.land_nft_id.clone(),
                     name: format!("{} Land {}", parcel.land_type, parcel.id),
                     world_id: parcel.world_id.clone(),
                     continent: parcel.continent.clone(),
@@ -1124,6 +1176,7 @@ impl<P: BlockchainProvider> PropertyService<P> {
                                         y: position.y,
                                         building_type: "legacy".to_string(),
                                         footprint: BuildingFootprint::small(),
+                                        building_nft_id: String::new(),
                                     })
                                     .collect(),
                             )
@@ -1651,7 +1704,6 @@ impl<P: BlockchainProvider> PropertyService<P> {
         {
             return Err(PropertyError::BuildingOwnershipMissing);
         }
-
         if !parcel
             .allowed_buildings
             .iter()
@@ -1684,6 +1736,9 @@ impl<P: BlockchainProvider> PropertyService<P> {
         if self.placement_conflicts_with_existing(parcel, &placement, &footprint) {
             return Err(PropertyError::BuildingPlacementConflict);
         }
+        if self.placements.values().flatten().any(|placed| placed.building_nft_id == building_nft_id) {
+            return Err(PropertyError::BuildingAlreadyPlaced);
+        }
 
         let mut updated_placements = self.placements.clone();
         updated_placements
@@ -1694,6 +1749,7 @@ impl<P: BlockchainProvider> PropertyService<P> {
                 y: placement.y,
                 building_type: asset.building_type.clone(),
                 footprint: footprint.clone(),
+                building_nft_id: building_nft_id.to_string(),
             });
         self.save_placements(&updated_placements)?;
         self.placements = updated_placements;
@@ -1889,6 +1945,16 @@ mod tests {
         );
 
         assert!(result.is_ok());
+        assert_eq!(
+            service.authorize_placement(
+                "player-1",
+                "parcel-1",
+                "land-1",
+                "building-1",
+                WorldPosition { x: 50, y: 50 },
+            ),
+            Err(PropertyError::BuildingAlreadyPlaced)
+        );
     }
 
     #[test]
