@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-10-08
+
+### Added
+
+- Added server-verified ownership for fixed-location land parcel NFTs.
+- Added one-of-one building NFT minting and a registry of building types supported by land parcels.
+- Added an in-game action that prefills placement for an owned parcel, using the targeted world position.
+- Building placement now checks land and building ownership, parcel permissions and bounds, capacity, collisions, and prevents reuse of a building NFT.
+- Added persistent placement records and parcel/building registry reloads.
+
 ## [0.18.4] - 2026-10-07
 
 ### Added
