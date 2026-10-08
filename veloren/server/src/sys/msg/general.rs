@@ -1,6 +1,6 @@
 use crate::{
     client::Client,
-    property::PropertyRuntime,
+    property::ActivePropertyRuntime,
     vgld::{
         DepositVerifier, SolanaDepositVerifier, VgldConfig, VgldLedger, apply_verified_deposit,
     },
@@ -35,7 +35,7 @@ impl Sys {
         entity: specs::Entity,
         client: &Client,
         player: Option<&Player>,
-        property_runtime: &mut PropertyRuntime,
+        property_runtime: &mut ActivePropertyRuntime,
         vgld_ledger: &mut VgldLedger,
         vgld_config: &VgldConfig,
         uids: &ReadStorage<'_, Uid>,
@@ -45,6 +45,7 @@ impl Sys {
     ) -> Result<(), crate::error::Error> {
         match msg {
             ClientGeneral::RequestPropertyParcels => {
+                property_runtime.reload_parcels();
                 let parcels = player
                     .map(|player| {
                         property_runtime.parcel_infos_for_player(&player.uuid().to_string())
@@ -393,7 +394,7 @@ impl<'a> System<'a> for Sys {
         ReadStorage<'a, Player>,
         ReadStorage<'a, Group>,
         WriteStorage<'a, Client>,
-        Write<'a, PropertyRuntime>,
+        Write<'a, ActivePropertyRuntime>,
         Write<'a, VgldLedger>,
         Read<'a, VgldConfig>,
     );

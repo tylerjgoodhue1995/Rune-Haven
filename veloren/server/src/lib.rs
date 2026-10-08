@@ -127,7 +127,7 @@ pub use world::{WorldGenerateStage, civ::WorldCivStage, sim::WorldSimStage};
 
 use crate::{
     persistence::{DatabaseSettings, SqlLogMode},
-    property::PropertyRuntime,
+    property::ActivePropertyRuntime,
     sys::terrain,
     vgld::{VgldConfig, VgldLedger},
 };
@@ -373,7 +373,7 @@ impl Server {
         state.ecs_mut().insert(RecentClientIPs::default());
         state
             .ecs_mut()
-            .insert(PropertyRuntime::with_persistence_path(
+            .insert(ActivePropertyRuntime::new_solana_with_persistence_path(
                 data_dir.join("property_placements.json"),
             ));
         state.ecs_mut().insert(VgldLedger::with_persistence_path(

@@ -348,14 +348,20 @@ impl SolanaBlockchainProvider {
             .and_then(|value| value.as_array())
             .map(|accounts| {
                 accounts.iter().any(|account| {
-                    account
+                            let info = account
                         .get("account")
                         .and_then(|account| account.get("data"))
                         .and_then(|data| data.get("parsed"))
-                        .and_then(|parsed| parsed.get("info"))
-                        .and_then(|info| info.get("mint"))
-                        .and_then(|mint| mint.as_str())
-                        .is_some_and(|mint| mint == nft_id)
+                                .and_then(|parsed| parsed.get("info"));
+                            info.and_then(|info| info.get("mint"))
+                                .and_then(|mint| mint.as_str())
+                                .is_some_and(|mint| mint == nft_id)
+                                && info.and_then(|info| info.pointer("/tokenAmount/amount"))
+                                    .and_then(Value::as_str)
+                                    == Some("1")
+                                && info.and_then(|info| info.pointer("/tokenAmount/decimals"))
+                                    .and_then(Value::as_u64)
+                                    == Some(0)
                 })
             })
             .unwrap_or(false);
@@ -430,25 +436,9 @@ impl BlockchainProvider for SolanaBlockchainProvider {
         &self,
         wallet: &str,
         land_nft_id: &str,
-        expected_collection: &str,
+        _expected_collection: &str,
     ) -> bool {
-        let metadata = self
-            .land_metadata
-            .get(land_nft_id)
-            .cloned()
-            .or_else(|| self.query_asset_metadata(land_nft_id, "land"));
-
-        let expected_collection = if expected_collection.is_empty() {
-            &self.config.land_collection
-        } else {
-            expected_collection
-        };
-
-        metadata.is_some_and(|metadata| {
-            metadata.asset_type == "land"
-                && metadata.collection == expected_collection
-                && self.wallet_owns_nft(wallet, land_nft_id)
-        })
+        self.wallet_owns_nft(wallet, land_nft_id)
     }
 
     fn verify_building_ownership(
@@ -845,9 +835,33 @@ impl PropertyRuntime<SolanaBlockchainProvider> {
         service.register_default_development_buildings();
         Self { service }
     }
+
+    pub fn new_solana_with_persistence_path(path: impl Into<PathBuf>) -> Self {
+        let mut runtime = Self::new_solana(BlockchainConfig::from_env());
+        let path = path.into();
+        runtime.service.set_persistence_path(path.clone());
+        runtime
+            .service
+            .load_or_generate_parcels(path.with_file_name("property_parcels.json"));
+        runtime.service.load_placements();
+        runtime
+    }
 }
 
+impl Default for PropertyRuntime<SolanaBlockchainProvider> {
+    fn default() -> Self { Self::new_solana(BlockchainConfig::default()) }
+}
+
+pub type ActivePropertyRuntime = PropertyRuntime<SolanaBlockchainProvider>;
+
 impl<P: BlockchainProvider> PropertyRuntime<P> {
+    pub fn reload_parcels(&mut self) {
+        if let Some(path) = self.service.persistence_path.clone() {
+            self.service
+                .load_or_generate_parcels(path.with_file_name("property_parcels.json"));
+        }
+    }
+
     pub fn parcel_infos(&self) -> Vec<common_net::msg::PropertyParcelInfo> {
         self.service.parcel_infos()
     }
@@ -1595,13 +1609,13 @@ impl<P: BlockchainProvider> PropertyService<P> {
         {
             return Err(PropertyError::LandOwnershipMissing);
         }
-        let land_metadata = self
-            .provider
-            .get_land_metadata(land_nft_id)
-            .ok_or(PropertyError::UnknownAsset)?;
-        if land_metadata.asset_type != "land"
-            || land_metadata.land_type.as_deref() != Some(parcel.land_type.as_str())
-            || land_metadata.world_id.as_deref() != Some(parcel.world_id.as_str())
+        if land_nft_id != parcel.land_nft_id {
+            return Err(PropertyError::LandMetadataMismatch);
+        }
+        if let Some(land_metadata) = self.provider.get_land_metadata(land_nft_id)
+            && (land_metadata.asset_type != "land"
+                || land_metadata.land_type.as_deref().is_some_and(|land_type| land_type != parcel.land_type)
+                || land_metadata.world_id.as_deref().is_some_and(|world_id| world_id != parcel.world_id))
         {
             return Err(PropertyError::LandMetadataMismatch);
         }

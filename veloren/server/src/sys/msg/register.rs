@@ -3,7 +3,7 @@ use crate::{
     client::Client,
     login_provider::{LoginProvider, PendingLogin, is_admin_wallet},
     metrics::PlayerMetrics,
-    property::PropertyRuntime,
+    property::ActivePropertyRuntime,
     settings::{BanOperation, banlist::NormalizedIpAddr},
     sys::sentinel::TrackedStorages,
 };
@@ -65,7 +65,7 @@ impl<'a> System<'a> for Sys {
         WriteStorage<'a, Player>,
         WriteStorage<'a, PendingLogin>,
         WriteExpect<'a, EditableSettings>,
-        WriteExpect<'a, PropertyRuntime>,
+        WriteExpect<'a, ActivePropertyRuntime>,
     );
 
     const NAME: &'static str = "msg::register";
@@ -158,7 +158,6 @@ impl<'a> System<'a> for Sys {
                         Ok((username, uuid)) => {
                             property_runtime
                                 .link_verified_wallet(&uuid.to_string(), &wallet_login.wallet);
-                            property_runtime.register_development_nfts(&wallet_login.wallet);
                             
                             // Auto-grant admin rights to the admin wallet
                             if is_admin_wallet(&wallet_login.wallet) {

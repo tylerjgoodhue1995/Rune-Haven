@@ -11,7 +11,7 @@ use crate::{
     character_creator,
     client::Client,
     persistence::{character_loader::CharacterLoader, character_updater::CharacterUpdater},
-    property::PropertyRuntime,
+    property::ActivePropertyRuntime,
     species_gate,
 };
 #[cfg(feature = "worldgen")]
@@ -347,7 +347,7 @@ pub struct ReadData<'a> {
     automod: ReadExpect<'a, AutoMod>,
     time: ReadExpect<'a, Time>,
     world: ReadExpect<'a, Arc<World>>,
-    property_runtime: ReadExpect<'a, PropertyRuntime>,
+    property_runtime: ReadExpect<'a, ActivePropertyRuntime>,
 
     #[cfg(feature = "worldgen")]
     index: ReadExpect<'a, IndexOwned>,
