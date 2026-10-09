@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.6] - 2026-10-09
+
+### Added
+
+- Authorized building placements now create persistent voxel structures at the owner's chosen parcel location.
+
+### Changed
+
+- Removed temporary client debug boxes for placed buildings; the server-rendered structures are shown in-world.
+
 ## [0.18.5] - 2026-10-08
 
 ### Added

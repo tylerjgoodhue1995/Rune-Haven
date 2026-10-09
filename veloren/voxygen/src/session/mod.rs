@@ -125,7 +125,6 @@ pub struct SessionState {
     lines: PlayerDebugLines,
     tracks: HashMap<Vec2<i32>, Vec<DebugShapeId>>,
     gizmos: Vec<(DebugShapeId, common::resources::Time, bool)>,
-    property_markers: HashSet<(String, i32, i32)>,
     property_parcel_outlines: HashSet<String>,
     pending_property_parcels: Vec<common_net::msg::PropertyParcelInfo>,
     wallet_bridge: Option<WalletBridge>,
@@ -208,7 +207,6 @@ impl SessionState {
             tracks: HashMap::new(),
             lines: Default::default(),
             gizmos: Vec::new(),
-            property_markers: HashSet::new(),
             property_parcel_outlines: HashSet::new(),
             pending_property_parcels: Vec::new(),
             wallet_bridge: None,
@@ -592,43 +590,10 @@ impl SessionState {
                 client::Event::PropertyPlacementResult {
                     success,
                     parcel_id,
-                    x,
-                    y,
-                    building_type,
                     message,
+                    ..
                 } => {
                     let message = format!("{parcel_id}: {message}");
-                    if success {
-                        let key = (parcel_id.clone(), x, y);
-                        if self.property_markers.insert(key) {
-                            let (size, color) = match building_type.as_deref().unwrap_or("shop") {
-                                "house" => (Vec3::new(3.2, 3.2, 2.6), [0.54, 0.44, 0.32, 1.0]),
-                                "inn" => (Vec3::new(4.0, 4.2, 3.8), [0.84, 0.62, 0.3, 1.0]),
-                                "blacksmith" => (Vec3::new(4.5, 3.6, 3.2), [0.72, 0.5, 0.25, 1.0]),
-                                "guild_hall" => (Vec3::new(5.5, 5.5, 4.4), [0.33, 0.29, 0.66, 1.0]),
-                                "farmhouse" => (Vec3::new(4.0, 4.0, 2.8), [0.53, 0.36, 0.15, 1.0]),
-                                "barn" => (Vec3::new(5.0, 3.4, 3.0), [0.55, 0.40, 0.20, 1.0]),
-                                "stable" => (Vec3::new(3.6, 4.2, 3.0), [0.61, 0.47, 0.30, 1.0]),
-                                "castle" => (Vec3::new(6.0, 6.0, 5.0), [0.8, 0.75, 0.72, 1.0]),
-                                "fortress" => (Vec3::new(6.4, 6.0, 5.5), [0.68, 0.7, 0.78, 1.0]),
-                                "town_hall" => (Vec3::new(5.8, 5.8, 5.2), [0.82, 0.71, 0.39, 1.0]),
-                                _ => (Vec3::new(4.0, 4.0, 3.0), [0.73, 0.44, 0.18, 1.0]),
-                            };
-                            let marker_pos = Vec3::new(x as f32, 1.0, y as f32);
-                            let marker_id = self
-                                .scene
-                                .debug
-                                .add_shape(crate::scene::DebugShape::Box { size });
-                            self.scene.debug.set_context(
-                                marker_id,
-                                marker_pos.with_w(0.0).into_array(),
-                                color,
-                                [0.0, 0.0, 0.0, 1.0],
-                            );
-                            self.gizmos
-                                .push((marker_id, common::resources::Time(f64::MAX), true));
-                        }
-                    }
                     self.hud.new_message(if success {
                         ChatType::Meta.into_plain_msg(message)
                     } else {
@@ -638,30 +603,6 @@ impl SessionState {
                 client::Event::PropertyParcels(parcels) => {
                     self.pending_property_parcels = parcels.clone();
                     self.hud.set_owned_property_map_markers(&parcels);
-                    for parcel in &parcels {
-                        for placement in &parcel.placed_positions {
-                            let key = (parcel.id.clone(), placement.x, placement.y);
-                            if self.property_markers.insert(key) {
-                                let marker_pos =
-                                    Vec3::new(placement.x as f32, 1.0, placement.y as f32);
-                                let marker_id =
-                                    self.scene.debug.add_shape(crate::scene::DebugShape::Box {
-                                        size: Vec3::new(4.0, 4.0, 3.0),
-                                    });
-                                self.scene.debug.set_context(
-                                    marker_id,
-                                    marker_pos.with_w(0.0).into_array(),
-                                    [0.73, 0.44, 0.18, 1.0],
-                                    [0.0, 0.0, 0.0, 1.0],
-                                );
-                                self.gizmos.push((
-                                    marker_id,
-                                    common::resources::Time(f64::MAX),
-                                    true,
-                                ));
-                            }
-                        }
-                    }
                     self.hud.set_property_parcels(parcels);
                 },
                 client::Event::Gizmos(gizmos) => {
@@ -2300,7 +2241,13 @@ impl PlayState for SessionState {
                     HudEvent::RequestPropertyParcels => {
                         self.client.borrow_mut().request_property_parcels();
                     },
-                    HudEvent::PlaceSelectedBuilding { parcel_id, land_nft_id, building_nft_id, x, y } => {
+                    HudEvent::PlaceSelectedBuilding {
+                        parcel_id,
+                        land_nft_id,
+                        building_nft_id,
+                        x,
+                        y,
+                    } => {
                         self.client.borrow_mut().request_property_placement(
                             parcel_id,
                             land_nft_id,

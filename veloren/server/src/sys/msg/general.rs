@@ -10,13 +10,97 @@ use common::{
     event::{self, EmitExt},
     event_emitters,
     resources::ProgramTime,
+    terrain::{Block, BlockKind, TerrainGrid},
     uid::Uid,
+    vol::ReadVol,
 };
 use common_ecs::{Job, Origin, Phase, System};
 use common_net::msg::{ClientGeneral, PropertyPurchaseState, ServerGeneral};
-use specs::{Entities, Join, LendJoin, Read, ReadStorage, Write, WriteStorage};
+use common_state::BlockChange;
+use specs::{Entities, Join, LendJoin, Read, ReadExpect, ReadStorage, Write, WriteStorage};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, warn};
+use vek::{Rgb, Vec2, Vec3};
+
+#[cfg(feature = "persistent_world")]
+type TerrainPersistenceData<'a> = Option<Write<'a, crate::TerrainPersistence>>;
+#[cfg(not(feature = "persistent_world"))]
+type TerrainPersistenceData<'a> = core::marker::PhantomData<&'a mut ()>;
+
+fn property_surface_z(terrain: &TerrainGrid, x: i32, y: i32) -> Option<i32> {
+    (-128..512).rev().find(|z| {
+        terrain
+            .get(Vec3::new(x, y, *z))
+            .is_ok_and(|block| !matches!(block.kind(), BlockKind::Air))
+    })
+}
+
+fn property_building_blocks(
+    center: Vec2<i32>,
+    ground_z: i32,
+    building_type: &str,
+) -> Vec<(Vec3<i32>, Block)> {
+    let (width, depth, wall_color, roof_color) = match building_type {
+        "barn" | "stable" => (9, 7, Rgb::new(111, 63, 36), Rgb::new(85, 49, 29)),
+        "castle" | "fortress" | "town_hall" | "guild_hall" => {
+            (11, 9, Rgb::new(153, 151, 143), Rgb::new(92, 90, 86))
+        },
+        "blacksmith" => (9, 7, Rgb::new(93, 64, 43), Rgb::new(75, 72, 70)),
+        _ => (7, 7, Rgb::new(123, 82, 48), Rgb::new(91, 56, 33)),
+    };
+    let half_width = width / 2;
+    let half_depth = depth / 2;
+    let mut blocks = Vec::new();
+    let mut add = |x, y, z, kind, color| {
+        blocks.push((Vec3::new(x, y, z), Block::new(kind, color)));
+    };
+
+    for dx in -half_width..=half_width {
+        for dy in -half_depth..=half_depth {
+            add(
+                center.x + dx,
+                center.y + dy,
+                ground_z + 1,
+                BlockKind::Wood,
+                Rgb::new(101, 70, 43),
+            );
+            let is_wall = dx.abs() == half_width || dy.abs() == half_depth;
+            for wall_z in 1..=4 {
+                let doorway = dy == -half_depth && dx == 0 && wall_z <= 2;
+                let window = wall_z == 3
+                    && ((dy == -half_depth || dy == half_depth) && dx.abs() == 2
+                        || (dx == -half_width || dx == half_width) && dy == 0);
+                if is_wall && !doorway && !window {
+                    add(
+                        center.x + dx,
+                        center.y + dy,
+                        ground_z + 1 + wall_z,
+                        BlockKind::Wood,
+                        wall_color,
+                    );
+                }
+            }
+        }
+    }
+
+    for roof_offset in 0..=half_width {
+        let roof_z = ground_z + 6 + roof_offset;
+        let x_offset = half_width - roof_offset;
+        for dy in -half_depth - 1..=half_depth + 1 {
+            for side in [-1, 1] {
+                add(
+                    center.x + side * x_offset,
+                    center.y + dy,
+                    roof_z,
+                    BlockKind::Wood,
+                    roof_color,
+                );
+            }
+        }
+    }
+
+    blocks
+}
 
 event_emitters! {
     struct Events[Emitters] {
@@ -36,6 +120,9 @@ impl Sys {
         client: &Client,
         player: Option<&Player>,
         property_runtime: &mut ActivePropertyRuntime,
+        terrain: &TerrainGrid,
+        block_changes: &mut BlockChange,
+        _terrain_persistence: &mut TerrainPersistenceData<'_>,
         vgld_ledger: &mut VgldLedger,
         vgld_config: &VgldConfig,
         uids: &ReadStorage<'_, Uid>,
@@ -298,6 +385,18 @@ impl Sys {
                 };
 
                 let player_id = player.uuid().to_string();
+                let Some(ground_z) = property_surface_z(terrain, x, y) else {
+                    client.send(ServerGeneral::PropertyPlacementResult {
+                        success: false,
+                        parcel_id,
+                        x,
+                        y,
+                        building_type: None,
+                        message: "travel to the parcel so its terrain is loaded, then try again"
+                            .to_string(),
+                    })?;
+                    return Ok(());
+                };
                 let result = property_runtime.authorize_placement(
                     &player_id,
                     &parcel_id,
@@ -310,6 +409,20 @@ impl Sys {
                 } else {
                     None
                 };
+                if result.is_ok()
+                    && let Some(building_type) = building_type.as_deref()
+                {
+                    for (position, block) in
+                        property_building_blocks(Vec2::new(x, y), ground_z, building_type)
+                    {
+                        if block_changes.try_set(position, block).is_some() {
+                            #[cfg(feature = "persistent_world")]
+                            if let Some(terrain_persistence) = _terrain_persistence.as_mut() {
+                                terrain_persistence.set_block(position, block);
+                            }
+                        }
+                    }
+                }
                 client.send(ServerGeneral::PropertyPlacementResult {
                     success: result.is_ok(),
                     parcel_id: parcel_id.clone(),
@@ -390,6 +503,9 @@ impl<'a> System<'a> for Sys {
         Entities<'a>,
         Events<'a>,
         Read<'a, ProgramTime>,
+        ReadExpect<'a, TerrainGrid>,
+        Write<'a, BlockChange>,
+        TerrainPersistenceData<'a>,
         ReadStorage<'a, Uid>,
         ReadStorage<'a, ChatMode>,
         ReadStorage<'a, Player>,
@@ -410,6 +526,9 @@ impl<'a> System<'a> for Sys {
             entities,
             events,
             program_time,
+            terrain,
+            mut block_changes,
+            mut terrain_persistence,
             uids,
             chat_modes,
             players,
@@ -430,6 +549,9 @@ impl<'a> System<'a> for Sys {
                     client,
                     player,
                     &mut property_runtime,
+                    &terrain,
+                    &mut block_changes,
+                    &mut terrain_persistence,
                     &mut vgld_ledger,
                     &vgld_config,
                     &uids,
